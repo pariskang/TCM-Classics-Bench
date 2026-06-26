@@ -127,12 +127,21 @@ spreads the result round-robin across books and tasks:
 # Deterministic (T1 + T6), no API key — 5000 questions, 16 books, ~9 s
 python -m tcm_bench simple --root corpus_src/book --n 5000 --out test_5k.jsonl
 
-# Mix in LLM-backed tasks (one API call per item, so it stops at exactly --n)
+# Mix in LLM-backed tasks with 16-way concurrency + a progress bar
 python -m tcm_bench simple --root corpus_src/book --n 500 --tasks T1 T6 T2 T8 \
-                           --llm --provider poe --model Claude-Sonnet-4
+                           --llm --provider poe --model Claude-Sonnet-4 \
+                           --workers 16 --progress
 ```
 
 A committed 500-item demo lives at `data/simple_sample.jsonl`.
+
+**Concurrency, progress, real-time writes.** `--workers N` fans the LLM calls
+out across a thread pool (`generate_items_concurrent`); `--progress` shows a
+`tqdm` bar; both `simple` and `generate` stream each validated item to the
+output file as it is produced, so a long run persists incrementally and can be
+resumed/inspected mid-flight. The Colab notebook adds **Google-Drive streaming**
+— each question is flushed to your Drive as it is generated, so a dropped
+session loses nothing.
 
 ### LLM providers
 

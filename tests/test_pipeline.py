@@ -15,6 +15,7 @@ from tcm_bench.generate import (
     LLMGenerator,
     balanced_take,
     generate_items,
+    generate_items_concurrent,
     generate_t1,
     generate_t6_from_formulas,
 )
@@ -218,3 +219,47 @@ def test_balanced_take_spreads_across_buckets():
 def test_balanced_take_caps_at_available():
     items = [{"task_code": "T1", "book_id": "A", "i": i} for i in range(3)]
     assert len(balanced_take(items, 10)) == 3
+
+
+# --- concurrent generation ---------------------------------------------
+class _CountingClient:
+    """Thread-safe fake client; records how many concurrent calls overlap."""
+
+    model = "fake"
+
+    def __init__(self):
+        import threading
+
+        self._lock = threading.Lock()
+        self.live = 0
+        self.max_live = 0
+
+    def complete(self, system, prompt, *, max_tokens=2048, temperature=0.0) -> str:
+        import time
+
+        with self._lock:
+            self.live += 1
+            self.max_live = max(self.max_live, self.live)
+        time.sleep(0.02)
+        with self._lock:
+            self.live -= 1
+        return '{"task":"term_annotation","question":"q","answer":"a","evidence":[],"inference_level":"direct"}'
+
+
+def test_concurrent_matches_serial_count(book_dir: Path):
+    recs = [r.to_dict() for r in ingest_book(book_dir, "2026-06-26")]
+    # Deterministic-only: concurrent path returns the same items as serial.
+    serial = list(generate_items(recs, ["T1", "T6"]))
+    conc = list(generate_items_concurrent(recs, ["T1", "T6"], max_workers=4))
+    assert {it.item_id for it in serial} == {it.item_id for it in conc}
+
+
+def test_concurrent_runs_llm_in_parallel(book_dir: Path):
+    recs = [r.to_dict() for r in ingest_book(book_dir, "2026-06-26")]
+    recs = recs * 6  # enough LLM jobs to overlap
+    client = _CountingClient()
+    gen = LLMGenerator(client)
+    items = list(generate_items_concurrent(recs, ["T3"], llm=gen, max_workers=4))
+    assert items  # T3 has no bespoke template -> generic prompt path
+    assert all(it.task_code == "T3" for it in items)
+    assert client.max_live >= 2  # actually ran concurrently

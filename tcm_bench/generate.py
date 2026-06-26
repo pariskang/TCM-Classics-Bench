@@ -234,6 +234,53 @@ def generate_items(
                     yield item
 
 
+def generate_items_concurrent(
+    records: Iterable[dict],
+    tasks: Iterable[str],
+    *,
+    llm: "LLMGenerator | None" = None,
+    max_workers: int = 8,
+) -> Iterator[BenchItem]:
+    """Like :func:`generate_items`, but runs the LLM tasks concurrently.
+
+    Deterministic items (T1, T6) are produced inline and yielded first — they
+    are CPU-cheap.  LLM tasks (one API call each) are fanned out across a
+    thread pool and yielded **as they complete**, so a progress bar advances
+    smoothly and a streaming writer can persist each item immediately.
+
+    Order is not preserved for the LLM items.  With ``llm=None`` this is just
+    the deterministic stream (``max_workers`` ignored).
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    task_set = set(tasks)
+    jobs: list[tuple[str, dict]] = []
+    for rec in records:
+        candidate = set(rec.get("candidate_tasks", [])) & task_set
+        if "T1" in candidate:
+            item = generate_t1(rec)
+            if item:
+                yield item
+        if "T6" in candidate:
+            yield from generate_t6_from_formulas(rec)
+        if llm is not None:
+            for tc in sorted(candidate - DETERMINISTIC):
+                jobs.append((tc, rec))
+
+    if llm is None or not jobs:
+        return
+
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = {pool.submit(llm.generate, tc, rec): (tc, rec) for tc, rec in jobs}
+        for fut in as_completed(futures):
+            try:
+                item = fut.result()
+            except Exception:  # a single failed call must not kill the batch
+                item = None
+            if item is not None:
+                yield item
+
+
 def balanced_take(items: Iterable[dict], n: int) -> list[dict]:
     """Take up to *n* items, spread round-robin across (task_code, book_id).
 

@@ -149,6 +149,20 @@ target (e.g. 5000 → 33000) continues rather than restarting or overwriting. Ea
 question is flushed to Drive as it is generated, so a dropped session loses
 nothing.
 
+**Why did I get far fewer than N?** Two losses used to be invisible: API calls
+erroring (rate limits) and items failing source-grounded validation. Now:
+
+- `LLMGenerator` **retries** transient API errors (exponential backoff), so a
+  burst of rate-limit 429s no longer silently throws items away. Keep
+  `--workers` modest (16–48) to avoid provoking limits in the first place.
+- `generate_items_concurrent(..., stats=d)` fills `d` with
+  `jobs_total / yielded / errored / parse_failed`, and the notebook prints a
+  full breakdown — generated vs validation-rejected, the top rejection reasons,
+  and how many were dropped as `external_required`. If many are
+  `external_required`, the question needed knowledge beyond the passage: lower
+  `--difficulty` (Expert → Hard) or widen `--tasks`.
+- Whatever was lost is simply re-attempted on the next (resumable) run.
+
 ### Harder LLM-generated items
 
 LLM tasks are steered toward **reasoning-heavy** questions, not surface

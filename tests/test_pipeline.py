@@ -336,6 +336,55 @@ def test_concurrent_skip_enables_resume(book_dir: Path):
     assert len(resumed) == len(first) - len(done)     # exactly the remainder
 
 
+def test_concurrent_stats_accounting(book_dir: Path):
+    recs = [r.to_dict() for r in ingest_book(book_dir, "2026-06-26")] * 4
+
+    class _Mixed:
+        model = "mixed"
+
+        def __init__(self):
+            import threading
+
+            self._lock = threading.Lock()
+            self._n = 0
+
+        def complete(self, system, prompt, *, max_tokens=2048, temperature=0.0):
+            with self._lock:
+                i = self._n
+                self._n += 1
+            return "no json" if i % 2 else '{"task":"t","answer":"a","evidence":[]}'
+
+    gen = LLMGenerator(_Mixed())
+    stats = {}
+    items = list(generate_items_concurrent(recs, ["T3"], llm=gen, max_workers=2, stats=stats))
+    assert stats["jobs_total"] == stats["errored"] + stats["parse_failed"] + stats["yielded"]
+    assert stats["yielded"] == len(items)
+    assert stats["parse_failed"] > 0  # the "no json" replies were counted, not hidden
+
+
+def test_llm_retry_recovers_transient_errors(book_dir: Path):
+    rec = next(r.to_dict() for r in ingest_book(book_dir, "2026-06-26"))
+
+    class _FlakyThenOk:
+        model = "flaky"
+
+        def __init__(self):
+            self.calls = 0
+
+        def complete(self, system, prompt, *, max_tokens=2048, temperature=0.0):
+            self.calls += 1
+            if self.calls < 3:
+                raise RuntimeError("429 rate limit")
+            return '{"task":"term_annotation","question":"q","answer":"a","evidence":[]}'
+
+    client = _FlakyThenOk()
+    # max_retries高、用极短 backoff 跑快一点
+    gen = LLMGenerator(client, max_retries=5)
+    item = gen.generate("T3", rec)
+    assert item is not None
+    assert client.calls == 3  # failed twice, succeeded on the third
+
+
 def test_concurrent_bounded_window(book_dir: Path):
     # With many jobs but an early break, only ~2*workers calls should fire.
     recs = [r.to_dict() for r in ingest_book(book_dir, "2026-06-26")] * 50

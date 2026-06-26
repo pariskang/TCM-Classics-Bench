@@ -22,7 +22,13 @@ SYSTEM = (
     "5. external_required 的任務不得進入正式 benchmark。\n"
     "6. 涉及犀角、麝香、朱砂、雄黃、烏頭、附子等安全或現代禁限用藥材時，"
     "必須在 safety_note 中說明「僅作古籍理解測評，不構成用藥建議」。\n"
-    "7. 所有答案必須可由 evidence_span 回指原文；輸出必須是合法 JSON。"
+    "7. 所有答案必須可由 evidence_span 回指原文；輸出必須是合法 JSON。\n"
+    "8. 應盡量出**能由本段原文支持**的難題：答案與（若為選擇題）各干擾項的排除理由"
+    "都要能在原文中找到依據，inference_level 用 direct 或 implicit。"
+    "只有在本段原文確實無法支撐任何合格難題時，才標 external_required —— "
+    "這種情況應是少數；不要為了拔高難度而輕易標 external_required。\n"
+    "9. evidence_span 必須是原文中**連續、逐字**出現的片段（可含標點），不得改寫、"
+    "拼接或加省略號。"
 )
 
 

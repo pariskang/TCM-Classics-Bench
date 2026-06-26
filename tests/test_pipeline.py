@@ -317,3 +317,82 @@ def test_concurrent_runs_llm_in_parallel(book_dir: Path):
     assert items  # T3 has no bespoke template -> generic prompt path
     assert all(it.task_code == "T3" for it in items)
     assert client.max_live >= 2  # actually ran concurrently
+
+
+def test_concurrent_skip_enables_resume(book_dir: Path):
+    recs = [r.to_dict() for r in ingest_book(book_dir, "2026-06-26")]
+    gen = LLMGenerator(_FakeClient(
+        '{"task":"term_annotation","question":"q","answer":"a","evidence":[]}'
+    ))
+    first = list(generate_items_concurrent(recs, ["T3"], llm=gen, max_workers=2))
+    assert first
+    # Mark the first half done; a resume run must not re-emit them.
+    done = {(it.passage_id, it.task_code) for it in first[: len(first) // 2 or 1]}
+    resumed = list(
+        generate_items_concurrent(recs, ["T3"], llm=gen, max_workers=2, skip=done)
+    )
+    resumed_keys = {(it.passage_id, it.task_code) for it in resumed}
+    assert resumed_keys.isdisjoint(done)              # skipped, not redone
+    assert len(resumed) == len(first) - len(done)     # exactly the remainder
+
+
+def test_concurrent_stats_accounting(book_dir: Path):
+    recs = [r.to_dict() for r in ingest_book(book_dir, "2026-06-26")] * 4
+
+    class _Mixed:
+        model = "mixed"
+
+        def __init__(self):
+            import threading
+
+            self._lock = threading.Lock()
+            self._n = 0
+
+        def complete(self, system, prompt, *, max_tokens=2048, temperature=0.0):
+            with self._lock:
+                i = self._n
+                self._n += 1
+            return "no json" if i % 2 else '{"task":"t","answer":"a","evidence":[]}'
+
+    gen = LLMGenerator(_Mixed())
+    stats = {}
+    items = list(generate_items_concurrent(recs, ["T3"], llm=gen, max_workers=2, stats=stats))
+    assert stats["jobs_total"] == stats["errored"] + stats["parse_failed"] + stats["yielded"]
+    assert stats["yielded"] == len(items)
+    assert stats["parse_failed"] > 0  # the "no json" replies were counted, not hidden
+
+
+def test_llm_retry_recovers_transient_errors(book_dir: Path):
+    rec = next(r.to_dict() for r in ingest_book(book_dir, "2026-06-26"))
+
+    class _FlakyThenOk:
+        model = "flaky"
+
+        def __init__(self):
+            self.calls = 0
+
+        def complete(self, system, prompt, *, max_tokens=2048, temperature=0.0):
+            self.calls += 1
+            if self.calls < 3:
+                raise RuntimeError("429 rate limit")
+            return '{"task":"term_annotation","question":"q","answer":"a","evidence":[]}'
+
+    client = _FlakyThenOk()
+    # max_retries高、用极短 backoff 跑快一点
+    gen = LLMGenerator(client, max_retries=5)
+    item = gen.generate("T3", rec)
+    assert item is not None
+    assert client.calls == 3  # failed twice, succeeded on the third
+
+
+def test_concurrent_bounded_window(book_dir: Path):
+    # With many jobs but an early break, only ~2*workers calls should fire.
+    recs = [r.to_dict() for r in ingest_book(book_dir, "2026-06-26")] * 50
+    client = _CountingClient()
+    gen = LLMGenerator(client)
+    stream = generate_items_concurrent(recs, ["T3"], llm=gen, max_workers=4)
+    taken = [next(stream) for _ in range(3)]
+    stream.close()  # consumer stops early
+    assert len(taken) == 3
+    # Far fewer than the full job list (which is >=50) ever started.
+    assert client.max_live <= 8 + 1

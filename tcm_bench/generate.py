@@ -142,20 +142,45 @@ class LLMGenerator:
         difficulty: str = "Hard",
         max_tokens: int = 2048,
         temperature: float = 0.0,
+        max_retries: int = 4,
     ):
         self.client = client
         self.model = getattr(client, "model", "llm")
         self.difficulty = difficulty
         self.max_tokens = max_tokens
         self.temperature = temperature
+        self.max_retries = max_retries
+        # Populated when generation runs; lets callers see why items were lost.
+        self.last_error: str | None = None
+
+    def _complete_with_retry(self, prompt: str) -> str:
+        """Call the client, retrying transient errors (rate limits, timeouts).
+
+        Re-raises the final exception so the orchestrator can count it as an
+        errored job rather than silently confusing it with a validation drop.
+        """
+        import time
+
+        delay = 1.0
+        for attempt in range(self.max_retries + 1):
+            try:
+                return self.client.complete(
+                    prompts.SYSTEM, prompt,
+                    max_tokens=self.max_tokens, temperature=self.temperature,
+                )
+            except Exception as e:  # noqa: BLE001 - provider-agnostic
+                self.last_error = f"{type(e).__name__}: {e}"
+                if attempt >= self.max_retries:
+                    raise
+                time.sleep(min(delay, 16.0))
+                delay *= 2
+        raise RuntimeError("unreachable")
 
     def generate(self, task_code: str, rec: dict) -> BenchItem | None:
         prompt = prompts.build_prompt(task_code, rec, self.difficulty)
         if prompt is None:
             return None
-        raw = self.client.complete(
-            prompts.SYSTEM, prompt, max_tokens=self.max_tokens, temperature=self.temperature
-        )
+        raw = self._complete_with_retry(prompt)
         data = _extract_json(raw)
         if data is None:
             return None
@@ -269,6 +294,8 @@ def generate_items_concurrent(
     *,
     llm: "LLMGenerator | None" = None,
     max_workers: int = 8,
+    skip: "set[tuple[str, str]] | None" = None,
+    stats: "dict | None" = None,
 ) -> Iterator[BenchItem]:
     """Like :func:`generate_items`, but runs the LLM tasks concurrently.
 
@@ -277,37 +304,83 @@ def generate_items_concurrent(
     thread pool and yielded **as they complete**, so a progress bar advances
     smoothly and a streaming writer can persist each item immediately.
 
+    *skip* is a set of ``(passage_id, task_code)`` already done — used for
+    **resume**: those jobs are not re-submitted, so re-running with a larger
+    target continues from where a previous run stopped instead of restarting.
+
+    *stats*, if given, is filled in so callers can see where items went:
+    ``jobs_total`` (LLM jobs after skip), ``errored`` (calls that raised after
+    retries), ``parse_failed`` (no JSON in the reply), ``yielded`` (items
+    actually produced).  ``jobs_total - errored - parse_failed == yielded``.
+
+    Submission is bounded to ``~2 * max_workers`` jobs in flight (a sliding
+    window), so a consumer that ``break``s after reaching its target wastes at
+    most that many extra API calls — not the whole job list.
+
     Order is not preserved for the LLM items.  With ``llm=None`` this is just
     the deterministic stream (``max_workers`` ignored).
     """
-    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 
     task_set = set(tasks)
+    skip = skip or set()
+    if stats is None:
+        stats = {}
+    stats.setdefault("jobs_total", 0)
+    stats.setdefault("errored", 0)
+    stats.setdefault("parse_failed", 0)
+    stats.setdefault("yielded", 0)
+
+    # Build deterministic items (yielded first) and the LLM job list, both
+    # honouring the resume *skip* set.
+    det_items: list[BenchItem] = []
     jobs: list[tuple[str, dict]] = []
     for rec in records:
         candidate = set(rec.get("candidate_tasks", [])) & task_set
-        if "T1" in candidate:
+        pid = rec["passage_id"]
+        if "T1" in candidate and (pid, "T1") not in skip:
             item = generate_t1(rec)
             if item:
-                yield item
-        if "T6" in candidate:
-            yield from generate_t6_from_formulas(rec)
+                det_items.append(item)
+        if "T6" in candidate and (pid, "T6") not in skip:
+            det_items.extend(generate_t6_from_formulas(rec))
         if llm is not None:
             for tc in sorted(candidate - DETERMINISTIC):
-                jobs.append((tc, rec))
+                if (pid, tc) not in skip:
+                    jobs.append((tc, rec))
 
+    stats["jobs_total"] = len(jobs)
+    yield from det_items
     if llm is None or not jobs:
         return
 
+    window = max(1, max_workers) * 2
+    idx = 0
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
-        futures = {pool.submit(llm.generate, tc, rec): (tc, rec) for tc, rec in jobs}
-        for fut in as_completed(futures):
-            try:
-                item = fut.result()
-            except Exception:  # a single failed call must not kill the batch
-                item = None
-            if item is not None:
-                yield item
+        inflight: dict = {}
+        while idx < len(jobs) and len(inflight) < window:
+            tc, rec = jobs[idx]
+            idx += 1
+            inflight[pool.submit(llm.generate, tc, rec)] = True
+
+        while inflight:
+            finished, _ = wait(list(inflight), return_when=FIRST_COMPLETED)
+            for fut in finished:
+                del inflight[fut]
+                try:
+                    item = fut.result()
+                    if item is None:  # reply had no parseable JSON
+                        stats["parse_failed"] += 1
+                except Exception:  # call raised after retries (rate limit, etc.)
+                    item = None
+                    stats["errored"] += 1
+                if idx < len(jobs):  # refill the window
+                    tc, rec = jobs[idx]
+                    idx += 1
+                    inflight[pool.submit(llm.generate, tc, rec)] = True
+                if item is not None:
+                    stats["yielded"] += 1
+                    yield item
 
 
 def balanced_take(items: Iterable[dict], n: int) -> list[dict]:

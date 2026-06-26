@@ -90,10 +90,12 @@ def _resolve_llm(args):
     return _make_llm(args)
 
 
-def _gen_stream(records, tasks, *, llm, workers):
+def _gen_stream(records, tasks, *, llm, workers, skip=None, stats=None):
     """Pick the serial or concurrent generator and yield item dicts."""
     if llm is not None and workers > 1:
-        gen = generate_items_concurrent(records, tasks, llm=llm, max_workers=workers)
+        gen = generate_items_concurrent(
+            records, tasks, llm=llm, max_workers=workers, skip=skip, stats=stats
+        )
     else:
         gen = generate_items(records, tasks, llm=llm)
     for item in gen:
@@ -192,8 +194,11 @@ def cmd_simple(args) -> None:
             except ImportError:
                 bar = None
         items = []
+        llm_stats: dict = {}
         with out.open("w", encoding="utf-8") as fh:
-            for d in _gen_stream(records, args.tasks, llm=llm, workers=args.workers):
+            for d in _gen_stream(
+                records, args.tasks, llm=llm, workers=args.workers, stats=llm_stats
+            ):
                 if validate_item(d, src.get(d["passage_id"], "")).ok:
                     items.append(d)
                     fh.write(json.dumps(d, ensure_ascii=False) + "\n")
@@ -206,6 +211,14 @@ def cmd_simple(args) -> None:
                     break
         if bar is not None:
             bar.close()
+        if llm_stats:
+            print(
+                f"  llm: jobs={llm_stats.get('jobs_total')} "
+                f"produced={llm_stats.get('yielded')} "
+                f"errored={llm_stats.get('errored')} "
+                f"parse_failed={llm_stats.get('parse_failed')}",
+                file=sys.stderr,
+            )
 
     by_task = dict(Counter(i["task_code"] for i in items))
     print(

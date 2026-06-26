@@ -12,9 +12,13 @@ license = {text = "MIT"}
 
 [project.optional-dependencies]
 opencc = ["opencc>=1.1"]
-llm = ["anthropic>=0.40"]
 extract = ["py7zr>=0.21"]
 dev = ["pytest>=7.0"]
+# LLM providers
+anthropic = ["anthropic>=0.40"]
+openai = ["openai>=1.40"]      # covers azure + poe (OpenAI-compatible)
+litellm = ["litellm>=1.40"]
+llm = ["anthropic>=0.40", "openai>=1.40", "litellm>=1.40"]
 
 [project.scripts]
 tcm-bench = "tcm_bench.cli:main"

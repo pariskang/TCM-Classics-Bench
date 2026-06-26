@@ -174,6 +174,15 @@ LLM 基於源文本倒推候選題                 prompts.py + generate.py
 確定性任務（T1 句讀、T6 `<F>` 方劑解析）無需 LLM，源約束由構造保證；其餘任務走
 LLM 路徑並必須通過 `validate.py`。
 
+**LLM 接入（provider-agnostic）**：`tcm_bench/llm.py` 提供統一 `complete()` 介面，
+內建四個 provider —— `anthropic`、`azure`（Azure OpenAI）、`poe`（OpenAI 相容端點）、
+`litellm`（通用路由，覆蓋 100+ 模型）。命令行用 `--provider/--model` 選擇，跨模型
+審核（cross-model review）即由不同 provider 生成/互審實現。
+
+**簡易模式（`simple`）**：一條命令產出均衡且已校驗的 N 道測試題（默認 5000）。默認僅
+用確定性生成器（T1+T6），無需 API key，數秒完成；對 (任務, 書目) 做輪轉均衡抽樣，
+覆蓋全部 pilot 書目。加 `--llm` 可混入模型生成任務（每題一次 API 調用，命中 N 即停）。
+
 ---
 
 ## 六、任務體系 T1–T12

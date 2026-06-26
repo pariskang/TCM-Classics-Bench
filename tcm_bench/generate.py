@@ -8,8 +8,9 @@ construction*:
     T6  formula structure parsing — read the ``<F>`` blocks already extracted
         during ingestion; every field is copied verbatim from the source.
 
-The LLM-backed path (``AnthropicGenerator``) drives the prompt templates for
-tasks that genuinely need a model, and parses the JSON reply into a BenchItem.
+The LLM-backed path (``LLMGenerator``) drives the prompt templates for tasks
+that genuinely need a model — over any provider in :mod:`tcm_bench.llm`
+(Anthropic, Azure, Poe, LiteLLM) — and parses the JSON reply into a BenchItem.
 Generated items are *candidates*: they must still pass ``validate`` and human
 review before entering the benchmark.
 """
@@ -18,7 +19,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import re
 from collections.abc import Iterable, Iterator
 
@@ -128,41 +128,37 @@ def generate_t6_from_formulas(rec: dict) -> Iterator[BenchItem]:
 # --------------------------------------------------------------------------
 # LLM-backed generation.
 # --------------------------------------------------------------------------
-class AnthropicGenerator:
-    """Thin wrapper over the Anthropic Messages API.
+class LLMGenerator:
+    """Drive the prompt templates with any :class:`tcm_bench.llm.LLMClient`.
 
-    Lazily imports ``anthropic`` so the rest of the package works without it.
+    Works with the Anthropic, Azure, Poe and LiteLLM clients in
+    :mod:`tcm_bench.llm` — anything exposing ``complete(system, prompt)``.
     """
 
-    def __init__(self, model: str = "claude-opus-4-8", api_key: str | None = None):
-        try:
-            import anthropic
-        except ImportError as e:  # pragma: no cover
-            raise RuntimeError(
-                "pip install anthropic to use the LLM-backed generators"
-            ) from e
-
-        self.model = model
-        self._client = anthropic.Anthropic(api_key=api_key or os.environ.get("ANTHROPIC_API_KEY"))
-
-    def _call(self, prompt: str) -> str:
-        msg = self._client.messages.create(
-            model=self.model,
-            max_tokens=2048,
-            system=prompts.SYSTEM,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        return "".join(block.text for block in msg.content if block.type == "text")
+    def __init__(self, client, *, max_tokens: int = 2048, temperature: float = 0.0):
+        self.client = client
+        self.model = getattr(client, "model", "llm")
+        self.max_tokens = max_tokens
+        self.temperature = temperature
 
     def generate(self, task_code: str, rec: dict) -> BenchItem | None:
-        builder = prompts.PROMPT_BUILDERS.get(task_code)
-        if builder is None:
+        prompt = prompts.build_prompt(task_code, rec)
+        if prompt is None:
             return None
-        raw = self._call(builder(rec))
+        raw = self.client.complete(
+            prompts.SYSTEM, prompt, max_tokens=self.max_tokens, temperature=self.temperature
+        )
         data = _extract_json(raw)
         if data is None:
             return None
         return _bench_item_from_llm(task_code, rec, data, self.model)
+
+
+def AnthropicGenerator(model: str = "claude-opus-4-8", api_key: str | None = None) -> LLMGenerator:
+    """Backwards-compatible helper: an :class:`LLMGenerator` on Anthropic."""
+    from .llm import AnthropicClient
+
+    return LLMGenerator(AnthropicClient(model=model, api_key=api_key))
 
 
 def _extract_json(text: str) -> dict | None:
@@ -175,10 +171,11 @@ def _extract_json(text: str) -> dict | None:
         return None
 
 
-_TASK_NAMES = {
-    "T2": "classical_translation",
-    "T6": "formula_structure_parsing",
-}
+def _default_task_name(task_code: str) -> str:
+    from .taxonomy import TASKS
+
+    task = TASKS.get(task_code)
+    return task.name_en if task else task_code
 
 
 def _bench_item_from_llm(task_code: str, rec: dict, data: dict, model: str) -> BenchItem:
@@ -186,7 +183,7 @@ def _bench_item_from_llm(task_code: str, rec: dict, data: dict, model: str) -> B
     spans = data.get("evidence") or data.get("evidence_spans") or []
     return BenchItem(
         item_id=_item_id(rec["book_id"], task_code, rec["passage_id"], salt=model),
-        task=data.get("task", _TASK_NAMES.get(task_code, task_code)),
+        task=data.get("task") or _default_task_name(task_code),
         task_code=task_code,
         question=data.get("question", ""),
         context=data.get("context") or rec["raw_text_trad"],
@@ -212,12 +209,14 @@ def generate_items(
     records: Iterable[dict],
     tasks: Iterable[str],
     *,
-    llm: AnthropicGenerator | None = None,
+    llm: "LLMGenerator | None" = None,
 ) -> Iterator[BenchItem]:
     """Yield candidate items for *tasks* over *records*.
 
     Deterministic tasks (T1, T6) always run.  Other tasks run only when an
-    *llm* client is supplied; otherwise they are skipped (no fabrication).
+    *llm* generator is supplied; otherwise they are skipped (no fabrication).
+    Consumers may ``break`` early — this is a generator, so generation (and
+    any API calls) stops as soon as you stop pulling from it.
     """
     task_set = set(tasks)
     for rec in records:
@@ -233,3 +232,29 @@ def generate_items(
                 item = llm.generate(tc, rec)
                 if item:
                     yield item
+
+
+def balanced_take(items: Iterable[dict], n: int) -> list[dict]:
+    """Take up to *n* items, spread round-robin across (task_code, book_id).
+
+    Deterministic: preserves input order within each bucket and interleaves
+    buckets, so no single book or task dominates a small sample.
+    """
+    from collections import defaultdict, deque
+
+    buckets: dict[tuple, deque] = defaultdict(deque)
+    order: list[tuple] = []
+    for it in items:
+        key = (it.get("task_code"), it.get("book_id"))
+        if key not in buckets:
+            order.append(key)
+        buckets[key].append(it)
+
+    out: list[dict] = []
+    while len(out) < n and any(buckets[k] for k in order):
+        for key in order:
+            if buckets[key]:
+                out.append(buckets[key].popleft())
+                if len(out) >= n:
+                    break
+    return out

@@ -39,6 +39,7 @@ textbook knowledge instead of the cited text, or the citation is real but the
 | `data/catalog.jsonl` | metadata for **all 803 books** (full coverage) |
 | `data/corpus/*.jsonl` | ingested passage samples for the three pilot corpora |
 | `data/bench/*.jsonl` | **validated benchmark items** (deterministic T1 + T6) |
+| `data/simple_sample.jsonl` | a 500-item demo from 简易模式 (`simple`) |
 | `data/STATS.json` | counts |
 | `tests/` | unit tests (run without the corpus) |
 
@@ -67,7 +68,10 @@ pip install -r requirements.txt
 # 1. Download + extract the Jicheng corpus snapshot (~69 MB) -> corpus_src/book/
 bash scripts/download_corpus.sh
 
-# 2. Regenerate all committed artifacts (catalog, corpus samples, bench items)
+# 2a. 简易模式 — one command, ~5000 validated questions in seconds, no API key
+python -m tcm_bench simple --root corpus_src/book --n 5000 --out test_5k.jsonl
+
+# 2b. Or regenerate all committed artifacts (catalog, corpus, bench items)
 python scripts/build_release.py --root corpus_src/book
 
 # --- or drive the pipeline stage by stage ---
@@ -77,16 +81,46 @@ python -m tcm_bench generate --corpus data/pilot/pilot2_zhongjing.jsonl \
                              --out items.jsonl --tasks T1 T6
 python -m tcm_bench validate --items items.jsonl \
                              --corpus data/pilot/pilot2_zhongjing.jsonl
-
-# LLM-backed tasks (T2-T12):
-export ANTHROPIC_API_KEY=...
-python -m tcm_bench generate --corpus data/pilot/pilot2_zhongjing.jsonl \
-                             --out items.jsonl --tasks T2 T6 --llm
 ```
 
 The committed `data/bench/*.jsonl` can be re-validated against the committed
 `data/corpus/*.jsonl` with no re-ingest, because the corpus sample is a
 superset of every cited passage.
+
+### 简易模式 (simple mode)
+
+`simple` is a turnkey path to a balanced, validated test set. It ingests the
+pilot corpora, generates items, validates every one against its source, and
+spreads the result round-robin across books and tasks:
+
+```bash
+# Deterministic (T1 + T6), no API key — 5000 questions, 16 books, ~9 s
+python -m tcm_bench simple --root corpus_src/book --n 5000 --out test_5k.jsonl
+
+# Mix in LLM-backed tasks (one API call per item, so it stops at exactly --n)
+python -m tcm_bench simple --root corpus_src/book --n 500 --tasks T1 T6 T2 T8 \
+                           --llm --provider poe --model Claude-Sonnet-4
+```
+
+A committed 500-item demo lives at `data/simple_sample.jsonl`.
+
+### LLM providers
+
+LLM-backed tasks (T2–T12) work through a provider-agnostic client
+(`tcm_bench/llm.py`). Pick one with `--provider`:
+
+| `--provider` | SDK | Env vars | `--model` example |
+| --- | --- | --- | --- |
+| `anthropic` (default) | `anthropic` | `ANTHROPIC_API_KEY` | `claude-opus-4-8` |
+| `azure` | `openai` | `AZURE_OPENAI_API_KEY`, `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_API_VERSION` | deployment name |
+| `poe` | `openai` | `POE_API_KEY` | `Claude-Sonnet-4` |
+| `litellm` | `litellm` | provider-specific | `azure/gpt-4o`, `gemini/gemini-1.5-pro` |
+
+```bash
+export AZURE_OPENAI_API_KEY=... AZURE_OPENAI_ENDPOINT=https://<res>.openai.azure.com
+python -m tcm_bench generate --corpus data/pilot/pilot2_zhongjing.jsonl \
+       --out items.jsonl --tasks T2 T6 --llm --provider azure --model my-gpt4o-deploy
+```
 
 ## Example item (T6 方劑結構解析, deterministic, 傷寒論宋本)
 

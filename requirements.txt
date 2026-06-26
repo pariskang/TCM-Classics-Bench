@@ -3,5 +3,9 @@
 
 opencc==1.1.9        # 繁->簡 conversion for raw_text_simp / normalized_text
 py7zr>=0.21          # pure-python 7z extraction if system 7z is unavailable
-anthropic>=0.40      # LLM-backed generators (T2-T12); needs ANTHROPIC_API_KEY
 pytest>=7.0          # tests
+
+# LLM providers (install only the one(s) you use):
+anthropic>=0.40      # provider=anthropic   ANTHROPIC_API_KEY
+openai>=1.40         # provider=azure | poe  AZURE_OPENAI_* / POE_API_KEY
+litellm>=1.40        # provider=litellm      universal router (100+ models)

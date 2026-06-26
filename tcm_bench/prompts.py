@@ -128,6 +128,32 @@ TRANSLATION_TEMPLATE = """請基於以下中醫笈成古籍片段，生成「文
 }}"""
 
 
+# --------------------------------------------------------------------------
+# Generic template — used for any task without a bespoke template, so all of
+# T1–T12 are reachable through the LLM path.  The task is described from the
+# taxonomy so the model knows what to produce.
+# --------------------------------------------------------------------------
+GENERIC_TEMPLATE = """請基於以下中醫笈成古籍片段，生成一道「{task_zh}」（{task_en}）測評題。
+
+任務說明：{task_desc}
+
+輸入：
+{meta}
+
+輸出 JSON（answer 的結構依任務而定，可為字符串、物件或陣列）：
+{{
+  "task": "{task_en}",
+  "question": "",
+  "context": "<相關原文 span>",
+  "answer": null,
+  "evidence": ["<原文 span，必須逐字出現於原文>"],
+  "inference_level": "direct/implicit/external_required",
+  "difficulty": "Easy/Medium/Hard/Expert",
+  "safety_note": "",
+  "quality_warning": ""
+}}"""
+
+
 def task_router_prompt(rec: dict) -> str:
     return TASK_ROUTER_TEMPLATE.format(meta=_meta_block(rec))
 
@@ -144,8 +170,33 @@ def translation_prompt(rec: dict) -> str:
     return TRANSLATION_TEMPLATE.format(meta=_meta_block(rec))
 
 
+def generic_prompt(task_code: str, rec: dict) -> str:
+    from .taxonomy import TASKS
+
+    task = TASKS[task_code]
+    return GENERIC_TEMPLATE.format(
+        task_zh=task.name_zh,
+        task_en=task.name_en,
+        task_desc=task.description,
+        meta=_meta_block(rec),
+    )
+
+
+# Bespoke per-task builders; tasks not listed fall back to ``generic_prompt``.
 PROMPT_BUILDERS = {
     "router": task_router_prompt,
     "T6": formula_parse_prompt,
     "T2": translation_prompt,
 }
+
+
+def build_prompt(task_code: str, rec: dict) -> str | None:
+    """Return the prompt for *task_code*, or ``None`` if it is not a T1–T12 task."""
+    from .taxonomy import TASKS
+
+    builder = PROMPT_BUILDERS.get(task_code)
+    if builder is not None:
+        return builder(rec)
+    if task_code in TASKS:
+        return generic_prompt(task_code, rec)
+    return None

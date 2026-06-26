@@ -10,8 +10,14 @@ from pathlib import Path
 
 import pytest
 
-from tcm_bench import markup, taxonomy
-from tcm_bench.generate import generate_items, generate_t1, generate_t6_from_formulas
+from tcm_bench import llm, markup, prompts, taxonomy
+from tcm_bench.generate import (
+    LLMGenerator,
+    balanced_take,
+    generate_items,
+    generate_t1,
+    generate_t6_from_formulas,
+)
 from tcm_bench.ingest import ingest_book, load_book_meta
 from tcm_bench.validate import validate_item
 
@@ -145,3 +151,70 @@ def test_generate_items_orchestration(book_dir: Path):
     items = list(generate_items(recs, ["T1", "T6"]))
     codes = {it.task_code for it in items}
     assert codes == {"T1", "T6"}
+
+
+# --- multi-provider LLM path -------------------------------------------
+class _FakeClient:
+    """Stand-in LLM client: returns a canned, source-grounded translation."""
+
+    model = "fake-model"
+
+    def __init__(self, payload: str):
+        self.payload = payload
+        self.calls: list[tuple[str, str]] = []
+
+    def complete(self, system, prompt, *, max_tokens=2048, temperature=0.0) -> str:
+        self.calls.append((system, prompt))
+        return self.payload
+
+
+def test_llm_generator_parses_json_into_item(book_dir: Path):
+    recs = [r.to_dict() for r in ingest_book(book_dir, "2026-06-26")]
+    cond = next(r for r in recs if "太陽病" in r["raw_text_trad"] and not r["formulas"])
+    payload = (
+        '这是模型回答 {"task":"classical_translation","question":"翻译",'
+        '"context":"太阳病","answer":"太阳病，症候齐备……",'
+        '"evidence":["太陽病"],"inference_level":"direct","difficulty":"Medium"}'
+    )
+    gen = LLMGenerator(_FakeClient(payload))
+    item = gen.generate("T2", cond)
+    assert item is not None
+    assert item.task_code == "T2"
+    assert item.generator == "fake-model"
+    assert item.evidence.spans == ["太陽病"]
+    # The shared system contract must be passed to the client.
+    assert gen.client.calls[0][0] == prompts.SYSTEM
+
+
+def test_build_prompt_covers_all_tasks(book_dir: Path):
+    rec = next(r.to_dict() for r in ingest_book(book_dir, "2026-06-26"))
+    for code in taxonomy.TASKS:
+        assert isinstance(prompts.build_prompt(code, rec), str)
+    assert prompts.build_prompt("NOT_A_TASK", rec) is None
+
+
+def test_make_client_unknown_provider():
+    import pytest as _pytest
+
+    with _pytest.raises(ValueError):
+        llm.make_client("nope")
+    assert set(llm.PROVIDERS) == {"anthropic", "azure", "poe", "litellm"}
+
+
+# --- simple-mode sampler ------------------------------------------------
+def test_balanced_take_spreads_across_buckets():
+    items = (
+        [{"task_code": "T1", "book_id": "A", "i": i} for i in range(100)]
+        + [{"task_code": "T1", "book_id": "B", "i": i} for i in range(2)]
+        + [{"task_code": "T6", "book_id": "A", "i": i} for i in range(100)]
+    )
+    out = balanced_take(items, 6)
+    assert len(out) == 6
+    # Round-robin must reach the tiny B bucket, not just the big A buckets.
+    assert any(it["book_id"] == "B" for it in out)
+    assert {it["task_code"] for it in out} == {"T1", "T6"}
+
+
+def test_balanced_take_caps_at_available():
+    items = [{"task_code": "T1", "book_id": "A", "i": i} for i in range(3)]
+    assert len(balanced_take(items, 10)) == 3

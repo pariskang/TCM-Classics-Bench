@@ -3,6 +3,7 @@
 
 opencc==1.1.9        # 繁->簡 conversion for raw_text_simp / normalized_text
 py7zr>=0.21          # pure-python 7z extraction if system 7z is unavailable
+tqdm>=4.65           # progress bar for --progress (optional)
 pytest>=7.0          # tests
 
 # LLM providers (install only the one(s) you use):

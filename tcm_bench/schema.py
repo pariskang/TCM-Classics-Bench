@@ -101,7 +101,8 @@ class BenchItem:
     passage_id: str
     inference_level: str = "direct"   # direct | implicit | external_required
     difficulty: str = "Medium"        # Easy | Medium | Hard | Expert
-    distractors: list = field(default_factory=list)
+    options: list = field(default_factory=list)        # MCQ options (T7-T9,T11,T12)
+    distractors: list = field(default_factory=list)    # [{option, exclusion_reason}]
     safety_note: str = ""
     quality_warning: str = ""
     generator: str = "deterministic"  # deterministic | <model id>

@@ -15,6 +15,7 @@ from tcm_bench.generate import (
     LLMGenerator,
     balanced_take,
     generate_items,
+    generate_items_concurrent,
     generate_t1,
     generate_t6_from_formulas,
 )
@@ -193,6 +194,60 @@ def test_build_prompt_covers_all_tasks(book_dir: Path):
     assert prompts.build_prompt("NOT_A_TASK", rec) is None
 
 
+def test_difficulty_steers_prompt(book_dir: Path):
+    rec = next(r.to_dict() for r in ingest_book(book_dir, "2026-06-26"))
+    expert = prompts.build_prompt("T3", rec, "Expert")
+    medium = prompts.build_prompt("T3", rec, "Medium")
+    assert "Expert" in expert and "專家級" in expert
+    assert expert != medium
+
+
+def test_mcq_tasks_use_mcq_template(book_dir: Path):
+    rec = next(r.to_dict() for r in ingest_book(book_dir, "2026-06-26"))
+    for code in prompts.MCQ_TASKS:
+        p = prompts.build_prompt(code, rec, "Hard")
+        assert "單選題" in p and "options" in p and "exclusion_reason" in p
+
+
+def test_llm_mcq_item_parsed_and_validated(book_dir: Path):
+    recs = [r.to_dict() for r in ingest_book(book_dir, "2026-06-26")]
+    rec = next(r for r in recs if "太陽病" in r["raw_text_trad"])
+    payload = (
+        '{"task":"syndrome_formula_mapping","question":"下列何方主之？",'
+        '"options":["A. 栝蔞桂枝湯","B. 葛根湯","C. 麻黃湯","D. 白虎湯"],'
+        '"answer":"A","distractors":['
+        '{"option":"B","exclusion_reason":"葛根湯主無汗，與本條不符","requires_external":false},'
+        '{"option":"C","exclusion_reason":"麻黃湯為傷寒表實","requires_external":false},'
+        '{"option":"D","exclusion_reason":"白虎湯主陽明熱盛","requires_external":false}],'
+        '"context":"太陽病","evidence":["太陽病"],"inference_level":"implicit","difficulty":"Expert"}'
+    )
+    gen = LLMGenerator(_FakeClient(payload), difficulty="Expert")
+    item = gen.generate("T8", rec)
+    assert item is not None
+    d = item.to_dict()
+    assert d["difficulty"] == "Expert"
+    assert len(d["options"]) == 4
+    assert d["answer"] == "A"
+    res = validate_item(d, rec["raw_text_trad"])
+    assert res.ok, res.errors
+
+
+def test_validate_rejects_mcq_without_exclusion_reason(book_dir: Path):
+    recs = [r.to_dict() for r in ingest_book(book_dir, "2026-06-26")]
+    rec = next(r for r in recs if "太陽病" in r["raw_text_trad"])
+    item = {
+        "task": "formula_differentiation", "task_code": "T9",
+        "question": "?", "context": "太陽病", "answer": "A",
+        "options": ["A. 栝蔞桂枝湯", "B. 葛根湯", "C. 麻黃湯"],
+        "distractors": [{"option": "B"}, {"option": "C"}],
+        "evidence": {"book_title_trad": "x", "source_id": "jicheng_tcm", "spans": ["太陽病"]},
+        "inference_level": "implicit",
+    }
+    res = validate_item(item, rec["raw_text_trad"])
+    assert not res.ok
+    assert any("exclusion_reason" in e for e in res.errors)
+
+
 def test_make_client_unknown_provider():
     import pytest as _pytest
 
@@ -218,3 +273,47 @@ def test_balanced_take_spreads_across_buckets():
 def test_balanced_take_caps_at_available():
     items = [{"task_code": "T1", "book_id": "A", "i": i} for i in range(3)]
     assert len(balanced_take(items, 10)) == 3
+
+
+# --- concurrent generation ---------------------------------------------
+class _CountingClient:
+    """Thread-safe fake client; records how many concurrent calls overlap."""
+
+    model = "fake"
+
+    def __init__(self):
+        import threading
+
+        self._lock = threading.Lock()
+        self.live = 0
+        self.max_live = 0
+
+    def complete(self, system, prompt, *, max_tokens=2048, temperature=0.0) -> str:
+        import time
+
+        with self._lock:
+            self.live += 1
+            self.max_live = max(self.max_live, self.live)
+        time.sleep(0.02)
+        with self._lock:
+            self.live -= 1
+        return '{"task":"term_annotation","question":"q","answer":"a","evidence":[],"inference_level":"direct"}'
+
+
+def test_concurrent_matches_serial_count(book_dir: Path):
+    recs = [r.to_dict() for r in ingest_book(book_dir, "2026-06-26")]
+    # Deterministic-only: concurrent path returns the same items as serial.
+    serial = list(generate_items(recs, ["T1", "T6"]))
+    conc = list(generate_items_concurrent(recs, ["T1", "T6"], max_workers=4))
+    assert {it.item_id for it in serial} == {it.item_id for it in conc}
+
+
+def test_concurrent_runs_llm_in_parallel(book_dir: Path):
+    recs = [r.to_dict() for r in ingest_book(book_dir, "2026-06-26")]
+    recs = recs * 6  # enough LLM jobs to overlap
+    client = _CountingClient()
+    gen = LLMGenerator(client)
+    items = list(generate_items_concurrent(recs, ["T3"], llm=gen, max_workers=4))
+    assert items  # T3 has no bespoke template -> generic prompt path
+    assert all(it.task_code == "T3" for it in items)
+    assert client.max_live >= 2  # actually ran concurrently

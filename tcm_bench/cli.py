@@ -14,11 +14,18 @@ from __future__ import annotations
 import argparse
 import json
 import random
+import sys
 from collections import Counter
 from pathlib import Path
 
 from . import ingest, taxonomy
-from .generate import LLMGenerator, balanced_take, generate_items
+from .generate import (
+    DETERMINISTIC,
+    LLMGenerator,
+    balanced_take,
+    generate_items,
+    generate_items_concurrent,
+)
 from .llm import PROVIDERS, make_client
 from .validate import validate_item
 
@@ -58,15 +65,79 @@ def cmd_ingest(args) -> None:
 
 
 def _make_llm(args):
-    return LLMGenerator(make_client(args.provider, args.model))
+    return LLMGenerator(
+        make_client(args.provider, args.model),
+        difficulty=getattr(args, "difficulty", "Hard"),
+    )
+
+
+def _resolve_llm(args):
+    """Build the LLM generator only if --llm AND at least one LLM task.
+
+    Warns (and returns None) on the common '--llm but only T1/T6' mistake, so
+    no client/SDK is needed for a deterministic run.
+    """
+    if not args.llm:
+        return None
+    if not (set(args.tasks) - DETERMINISTIC):
+        print(
+            "WARNING: --llm was set but --tasks contains only deterministic "
+            f"tasks {sorted(DETERMINISTIC)}; no LLM call will be made. "
+            "Add LLM tasks, e.g. --tasks T2 T3 T8 T9 T11.",
+            file=sys.stderr,
+        )
+        return None
+    return _make_llm(args)
+
+
+def _gen_stream(records, tasks, *, llm, workers):
+    """Pick the serial or concurrent generator and yield item dicts."""
+    if llm is not None and workers > 1:
+        gen = generate_items_concurrent(records, tasks, llm=llm, max_workers=workers)
+    else:
+        gen = generate_items(records, tasks, llm=llm)
+    for item in gen:
+        yield item.to_dict()
+
+
+def _stream_write(path: Path, item_dicts, *, limit=None, progress=False) -> list[dict]:
+    """Append each item to *path* as it is produced (real-time persistence).
+
+    Returns the list of written items.  Shows a tqdm bar when *progress* and
+    tqdm is installed; otherwise prints a periodic counter.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    bar = None
+    if progress:
+        try:
+            from tqdm.auto import tqdm
+
+            bar = tqdm(total=limit, unit="item", desc="generate")
+        except ImportError:
+            bar = None
+    written: list[dict] = []
+    with path.open("w", encoding="utf-8") as fh:
+        for d in item_dicts:
+            fh.write(json.dumps(d, ensure_ascii=False) + "\n")
+            fh.flush()
+            written.append(d)
+            if bar is not None:
+                bar.update(1)
+            elif progress and len(written) % 100 == 0:
+                print(f"  ... {len(written)} items", flush=True)
+            if limit is not None and len(written) >= limit:
+                break
+    if bar is not None:
+        bar.close()
+    return written
 
 
 def cmd_generate(args) -> None:
     records = _read_jsonl(Path(args.corpus))
-    llm = _make_llm(args) if args.llm else None
-    items = (item.to_dict() for item in generate_items(records, args.tasks, llm=llm))
-    n = _write_jsonl(Path(args.out), items)
-    print(f"generate: {n} candidate items -> {args.out}")
+    llm = _resolve_llm(args)
+    stream = _gen_stream(records, args.tasks, llm=llm, workers=args.workers)
+    written = _stream_write(Path(args.out), stream, progress=args.progress)
+    print(f"generate: {len(written)} candidate items -> {args.out}")
 
 
 def _ingest_pilots(root: Path, pilots, date: str, min_chars: int) -> list[dict]:
@@ -93,25 +164,52 @@ def cmd_simple(args) -> None:
     random.Random(args.seed).shuffle(records)
     src = {r["passage_id"]: r["raw_text_trad"] for r in records}
 
-    llm = _make_llm(args) if args.llm else None
-    valid: list[dict] = []
-    failed = 0
-    for item in generate_items(records, args.tasks, llm=llm):
-        d = item.to_dict()
-        if validate_item(d, src.get(d["passage_id"], "")).ok:
-            valid.append(d)
-        else:
-            failed += 1
-        # With an LLM each item is an API call — stop as soon as we have N.
-        if llm is not None and len(valid) >= args.n:
-            break
-
-    items = valid[: args.n] if llm is not None else balanced_take(valid, args.n)
+    llm = _resolve_llm(args)
     out = Path(args.out)
-    n = _write_jsonl(out, items)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    failed = 0
+
+    if llm is None:
+        # Deterministic (fast): generate the whole pool, then balance to N so
+        # books/tasks are evenly represented.
+        valid = []
+        for d in _gen_stream(records, args.tasks, llm=None, workers=1):
+            if validate_item(d, src.get(d["passage_id"], "")).ok:
+                valid.append(d)
+            else:
+                failed += 1
+        items = balanced_take(valid, args.n)
+        _write_jsonl(out, items)
+    else:
+        # LLM path: concurrent + stream each validated item to disk in real
+        # time + progress bar; stop once we have N (each item is an API call).
+        bar = None
+        if args.progress:
+            try:
+                from tqdm.auto import tqdm
+
+                bar = tqdm(total=args.n, unit="item", desc="simple")
+            except ImportError:
+                bar = None
+        items = []
+        with out.open("w", encoding="utf-8") as fh:
+            for d in _gen_stream(records, args.tasks, llm=llm, workers=args.workers):
+                if validate_item(d, src.get(d["passage_id"], "")).ok:
+                    items.append(d)
+                    fh.write(json.dumps(d, ensure_ascii=False) + "\n")
+                    fh.flush()
+                    if bar is not None:
+                        bar.update(1)
+                else:
+                    failed += 1
+                if len(items) >= args.n:
+                    break
+        if bar is not None:
+            bar.close()
+
     by_task = dict(Counter(i["task_code"] for i in items))
     print(
-        f"simple: {n} items -> {out}  (requested {args.n}, "
+        f"simple: {len(items)} items -> {out}  (requested {args.n}, "
         f"{failed} failed validation)\n  by task: {by_task}\n"
         f"  books covered: {len({i['book_id'] for i in items})}"
     )
@@ -141,6 +239,17 @@ def _add_llm_args(c: argparse.ArgumentParser) -> None:
     c.add_argument(
         "--model", default=None,
         help="model / deployment id (provider default used if omitted)",
+    )
+    c.add_argument(
+        "--workers", type=int, default=8,
+        help="concurrent LLM calls (used only with --llm; default 8)",
+    )
+    c.add_argument(
+        "--difficulty", default="Hard", choices=["Medium", "Hard", "Expert"],
+        help="LLM item difficulty (default Hard)",
+    )
+    c.add_argument(
+        "--progress", action="store_true", help="show a tqdm progress bar",
     )
 
 

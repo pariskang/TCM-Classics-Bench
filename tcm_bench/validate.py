@@ -61,14 +61,37 @@ def validate_item(item: dict, source_text: str) -> ValidationResult:
     if task == "punctuation_restoration":
         errors += _validate_punctuation(item, source_text)
 
+    # 4b. MCQ items: each distractor needs a source-based exclusion reason;
+    # an exclusion that needs outside knowledge downgrades the item.
+    if item.get("options"):
+        errors += _validate_mcq_shape(item, warnings)
+
     # 5. Safety: toxic/restricted herbs require a safety note.
     from .generate import SAFETY_HERBS
 
-    text_for_safety = f"{item.get('context','')}{_answer_text(answer)}"
+    text_for_safety = (
+        f"{item.get('context','')}{_answer_text(answer)}"
+        f"{' '.join(map(str, item.get('options') or []))}"
+    )
     if any(h in text_for_safety for h in SAFETY_HERBS) and not item.get("safety_note"):
         warnings.append("toxic/restricted herb present but safety_note empty")
 
     return ValidationResult(ok=not errors, errors=errors, warnings=warnings)
+
+
+def _validate_mcq_shape(item: dict, warnings: list[str]) -> list[str]:
+    errors: list[str] = []
+    options = item.get("options") or []
+    if len(options) < 3:
+        errors.append(f"MCQ needs >=3 options, got {len(options)}")
+    if not item.get("answer"):
+        errors.append("MCQ has no answer")
+    for d in item.get("distractors", []):
+        if not d.get("exclusion_reason"):
+            errors.append("distractor without exclusion_reason")
+        elif d.get("requires_external"):
+            warnings.append("distractor exclusion needs external knowledge -> downgrade to training")
+    return errors
 
 
 def _validate_formula(answer: dict, source_text: str) -> list[str]:

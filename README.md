@@ -136,12 +136,18 @@ python -m tcm_bench simple --root corpus_src/book --n 500 --tasks T1 T6 T2 T8 \
 A committed 500-item demo lives at `data/simple_sample.jsonl`.
 
 **Concurrency, progress, real-time writes.** `--workers N` fans the LLM calls
-out across a thread pool (`generate_items_concurrent`); `--progress` shows a
-`tqdm` bar; both `simple` and `generate` stream each validated item to the
-output file as it is produced, so a long run persists incrementally and can be
-resumed/inspected mid-flight. The Colab notebook adds **Google-Drive streaming**
-— each question is flushed to your Drive as it is generated, so a dropped
-session loses nothing.
+out across a **bounded** thread pool (`generate_items_concurrent`, ~`2N` jobs in
+flight) so stopping at the target wastes few calls; `--progress` shows a `tqdm`
+bar; both `simple` and `generate` stream each validated item to the output file
+as it is produced, so a long run persists incrementally.
+
+**Resume (断点续跑).** `generate_items_concurrent(..., skip=done)` skips a set of
+`(passage_id, task_code)` already generated. The Colab notebook uses this to
+**continue from where a previous run stopped**: it reads the questions already
+written to Google Drive, skips them, and appends in `"a"` mode — so raising the
+target (e.g. 5000 → 33000) continues rather than restarting or overwriting. Each
+question is flushed to Drive as it is generated, so a dropped session loses
+nothing.
 
 ### Harder LLM-generated items
 

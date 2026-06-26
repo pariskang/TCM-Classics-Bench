@@ -269,6 +269,7 @@ def generate_items_concurrent(
     *,
     llm: "LLMGenerator | None" = None,
     max_workers: int = 8,
+    skip: "set[tuple[str, str]] | None" = None,
 ) -> Iterator[BenchItem]:
     """Like :func:`generate_items`, but runs the LLM tasks concurrently.
 
@@ -277,37 +278,67 @@ def generate_items_concurrent(
     thread pool and yielded **as they complete**, so a progress bar advances
     smoothly and a streaming writer can persist each item immediately.
 
+    *skip* is a set of ``(passage_id, task_code)`` already done — used for
+    **resume**: those jobs are not re-submitted, so re-running with a larger
+    target continues from where a previous run stopped instead of restarting.
+
+    Submission is bounded to ``~2 * max_workers`` jobs in flight (a sliding
+    window), so a consumer that ``break``s after reaching its target wastes at
+    most that many extra API calls — not the whole job list.
+
     Order is not preserved for the LLM items.  With ``llm=None`` this is just
     the deterministic stream (``max_workers`` ignored).
     """
-    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 
     task_set = set(tasks)
+    skip = skip or set()
+
+    # Build deterministic items (yielded first) and the LLM job list, both
+    # honouring the resume *skip* set.
+    det_items: list[BenchItem] = []
     jobs: list[tuple[str, dict]] = []
     for rec in records:
         candidate = set(rec.get("candidate_tasks", [])) & task_set
-        if "T1" in candidate:
+        pid = rec["passage_id"]
+        if "T1" in candidate and (pid, "T1") not in skip:
             item = generate_t1(rec)
             if item:
-                yield item
-        if "T6" in candidate:
-            yield from generate_t6_from_formulas(rec)
+                det_items.append(item)
+        if "T6" in candidate and (pid, "T6") not in skip:
+            det_items.extend(generate_t6_from_formulas(rec))
         if llm is not None:
             for tc in sorted(candidate - DETERMINISTIC):
-                jobs.append((tc, rec))
+                if (pid, tc) not in skip:
+                    jobs.append((tc, rec))
 
+    yield from det_items
     if llm is None or not jobs:
         return
 
+    window = max(1, max_workers) * 2
+    idx = 0
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
-        futures = {pool.submit(llm.generate, tc, rec): (tc, rec) for tc, rec in jobs}
-        for fut in as_completed(futures):
-            try:
-                item = fut.result()
-            except Exception:  # a single failed call must not kill the batch
-                item = None
-            if item is not None:
-                yield item
+        inflight: dict = {}
+        while idx < len(jobs) and len(inflight) < window:
+            tc, rec = jobs[idx]
+            idx += 1
+            inflight[pool.submit(llm.generate, tc, rec)] = True
+
+        while inflight:
+            finished, _ = wait(list(inflight), return_when=FIRST_COMPLETED)
+            for fut in finished:
+                del inflight[fut]
+                try:
+                    item = fut.result()
+                except Exception:  # a single failed call must not kill the batch
+                    item = None
+                if idx < len(jobs):  # refill the window
+                    tc, rec = jobs[idx]
+                    idx += 1
+                    inflight[pool.submit(llm.generate, tc, rec)] = True
+                if item is not None:
+                    yield item
 
 
 def balanced_take(items: Iterable[dict], n: int) -> list[dict]:

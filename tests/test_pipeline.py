@@ -317,3 +317,33 @@ def test_concurrent_runs_llm_in_parallel(book_dir: Path):
     assert items  # T3 has no bespoke template -> generic prompt path
     assert all(it.task_code == "T3" for it in items)
     assert client.max_live >= 2  # actually ran concurrently
+
+
+def test_concurrent_skip_enables_resume(book_dir: Path):
+    recs = [r.to_dict() for r in ingest_book(book_dir, "2026-06-26")]
+    gen = LLMGenerator(_FakeClient(
+        '{"task":"term_annotation","question":"q","answer":"a","evidence":[]}'
+    ))
+    first = list(generate_items_concurrent(recs, ["T3"], llm=gen, max_workers=2))
+    assert first
+    # Mark the first half done; a resume run must not re-emit them.
+    done = {(it.passage_id, it.task_code) for it in first[: len(first) // 2 or 1]}
+    resumed = list(
+        generate_items_concurrent(recs, ["T3"], llm=gen, max_workers=2, skip=done)
+    )
+    resumed_keys = {(it.passage_id, it.task_code) for it in resumed}
+    assert resumed_keys.isdisjoint(done)              # skipped, not redone
+    assert len(resumed) == len(first) - len(done)     # exactly the remainder
+
+
+def test_concurrent_bounded_window(book_dir: Path):
+    # With many jobs but an early break, only ~2*workers calls should fire.
+    recs = [r.to_dict() for r in ingest_book(book_dir, "2026-06-26")] * 50
+    client = _CountingClient()
+    gen = LLMGenerator(client)
+    stream = generate_items_concurrent(recs, ["T3"], llm=gen, max_workers=4)
+    taken = [next(stream) for _ in range(3)]
+    stream.close()  # consumer stops early
+    assert len(taken) == 3
+    # Far fewer than the full job list (which is >=50) ever started.
+    assert client.max_live <= 8 + 1

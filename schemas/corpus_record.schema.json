@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/pariskang/tcm-classics-bench/schemas/corpus_record.schema.json",
+  "title": "TCM-Classics-Bench Corpus Record",
+  "description": "One ingested passage from a 中醫笈成 classical text.",
+  "type": "object",
+  "required": [
+    "passage_id", "book_id", "book_title_trad", "book_title_simp",
+    "category_level_1", "raw_text_trad", "raw_text_simp", "normalized_text",
+    "source_id", "version_commit"
+  ],
+  "properties": {
+    "passage_id": {"type": "string"},
+    "book_id": {"type": "string"},
+    "book_title_trad": {"type": "string"},
+    "book_title_simp": {"type": "string"},
+    "author": {"type": ["string", "null"]},
+    "dynasty": {"type": ["string", "null"]},
+    "year": {"type": ["string", "null"]},
+    "category_level_1": {"type": "string"},
+    "category_level_2": {"type": "string"},
+    "base_text": {"type": ["string", "null"], "description": "底本 / 參本"},
+    "quality_score_source": {"type": ["string", "null"]},
+    "quality_tier": {"enum": ["test", "candidate", "explore", "unscored"]},
+    "heading_path": {"type": "array", "items": {"type": "string"}},
+    "chapter": {"type": ["string", "null"]},
+    "section_title": {"type": ["string", "null"]},
+    "raw_text_trad": {"type": "string"},
+    "raw_text_simp": {"type": "string"},
+    "normalized_text": {"type": "string"},
+    "formulas": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "formula_name": {"type": ["string", "null"]},
+          "ingredients": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "herb": {"type": "string"},
+                "dose": {"type": ["string", "null"]},
+                "preparation": {"type": ["string", "null"]}
+              }
+            }
+          },
+          "text": {"type": "string"}
+        }
+      }
+    },
+    "candidate_tasks": {"type": "array", "items": {"type": "string"}},
+    "punctuation_status": {"enum": ["source_punctuated", "unpunctuated", "unknown"]},
+    "source_id": {"const": "jicheng_tcm"},
+    "source_url": {"type": ["string", "null"]},
+    "source_license": {"type": "string"},
+    "version_commit": {"type": "string"},
+    "ingestion_date": {"type": ["string", "null"]}
+  }
+}

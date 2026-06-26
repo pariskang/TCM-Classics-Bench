@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/pariskang/tcm-classics-bench/schemas/bench_item.schema.json",
+  "title": "TCM-Classics-Bench Item",
+  "description": "A generated, source-grounded benchmark question.",
+  "type": "object",
+  "required": [
+    "item_id", "task", "task_code", "question", "answer",
+    "evidence", "book_id", "passage_id", "inference_level", "source_id"
+  ],
+  "properties": {
+    "item_id": {"type": "string"},
+    "task": {"type": "string", "description": "machine task name, e.g. formula_structure_parsing"},
+    "task_code": {"enum": ["T1","T2","T3","T4","T5","T6","T7","T8","T9","T10","T11","T12"]},
+    "question": {"type": "string"},
+    "context": {"type": "string"},
+    "answer": {"description": "task-dependent: string | object | array"},
+    "evidence": {
+      "type": "object",
+      "required": ["book_title_trad", "source_id"],
+      "properties": {
+        "book_title_trad": {"type": "string"},
+        "chapter": {"type": ["string", "null"]},
+        "base_text": {"type": ["string", "null"]},
+        "source_id": {"const": "jicheng_tcm"},
+        "source": {"type": "string"},
+        "version_commit": {"type": "string"},
+        "spans": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "book_id": {"type": "string"},
+    "passage_id": {"type": "string"},
+    "inference_level": {
+      "enum": ["direct", "implicit", "external_required"],
+      "description": "external_required items MUST NOT enter the formal test set"
+    },
+    "difficulty": {"enum": ["Easy", "Medium", "Hard", "Expert"]},
+    "distractors": {"type": "array"},
+    "safety_note": {"type": "string"},
+    "quality_warning": {"type": "string"},
+    "generator": {"type": "string", "description": "'deterministic' or a model id"},
+    "review_status": {"enum": ["unreviewed", "auto_validated", "expert_approved", "rejected"]},
+    "source_id": {"const": "jicheng_tcm"}
+  }
+}

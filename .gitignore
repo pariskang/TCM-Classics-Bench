@@ -1,0 +1,15 @@
+# Downloaded / extracted corpus — reproducible via scripts/download_corpus.sh
+corpus_src/
+*.7z
+
+# Full (uncapped) ingest output
+data/pilot/
+data/full/
+
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+venv/
+*.egg-info/
+.DS_Store

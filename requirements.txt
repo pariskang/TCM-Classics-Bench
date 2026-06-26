@@ -1,0 +1,7 @@
+# Core pipeline has no hard third-party dependency.
+# Optional extras enable specific features:
+
+opencc==1.1.9        # 繁->簡 conversion for raw_text_simp / normalized_text
+py7zr>=0.21          # pure-python 7z extraction if system 7z is unavailable
+anthropic>=0.40      # LLM-backed generators (T2-T12); needs ANTHROPIC_API_KEY
+pytest>=7.0          # tests

@@ -1,0 +1,65 @@
+{
+  "corpus_version": "book-20180111",
+  "books": 803,
+  "pilots": {
+    "pilot1_classics": {
+      "books": [
+        "黃帝內經素問",
+        "靈樞",
+        "難經"
+      ],
+      "passages_full": 1245,
+      "passages_sampled": 110,
+      "formula_passages": 0,
+      "items_generated": 859,
+      "items_valid": 859,
+      "items_failed_validation": 0,
+      "items_committed": 75,
+      "by_task": {
+        "T1": 859
+      }
+    },
+    "pilot2_zhongjing": {
+      "books": [
+        "傷寒論_宋本",
+        "金匱要略方論",
+        "金匱要略_條文版",
+        "傷寒論類方",
+        "長沙方歌括",
+        "金匱方歌括"
+      ],
+      "passages_full": 4305,
+      "passages_sampled": 255,
+      "formula_passages": 596,
+      "items_generated": 4195,
+      "items_valid": 4195,
+      "items_failed_validation": 0,
+      "items_committed": 225,
+      "by_task": {
+        "T1": 3688,
+        "T6": 507
+      }
+    },
+    "pilot3_materia_formulae": {
+      "books": [
+        "太平惠民和劑局方",
+        "醫方集解",
+        "神農本草經",
+        "本草綱目",
+        "本草備要",
+        "雷公炮炙論",
+        "湯頭歌訣"
+      ],
+      "passages_full": 34354,
+      "passages_sampled": 226,
+      "formula_passages": 0,
+      "items_generated": 28679,
+      "items_valid": 28679,
+      "items_failed_validation": 0,
+      "items_committed": 175,
+      "by_task": {
+        "T1": 28679
+      }
+    }
+  }
+}

@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tcm-classics-bench"
+version = "0.1.0"
+description = "Source-grounded benchmark builder for classical Chinese-medicine texts (Jicheng-TCM)"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+
+[project.optional-dependencies]
+opencc = ["opencc>=1.1"]
+llm = ["anthropic>=0.40"]
+extract = ["py7zr>=0.21"]
+dev = ["pytest>=7.0"]
+
+[project.scripts]
+tcm-bench = "tcm_bench.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["tcm_bench*"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]

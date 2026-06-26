@@ -14,11 +14,13 @@ from __future__ import annotations
 import argparse
 import json
 import random
+import sys
 from collections import Counter
 from pathlib import Path
 
 from . import ingest, taxonomy
 from .generate import (
+    DETERMINISTIC,
     LLMGenerator,
     balanced_take,
     generate_items,
@@ -63,7 +65,29 @@ def cmd_ingest(args) -> None:
 
 
 def _make_llm(args):
-    return LLMGenerator(make_client(args.provider, args.model))
+    return LLMGenerator(
+        make_client(args.provider, args.model),
+        difficulty=getattr(args, "difficulty", "Hard"),
+    )
+
+
+def _resolve_llm(args):
+    """Build the LLM generator only if --llm AND at least one LLM task.
+
+    Warns (and returns None) on the common '--llm but only T1/T6' mistake, so
+    no client/SDK is needed for a deterministic run.
+    """
+    if not args.llm:
+        return None
+    if not (set(args.tasks) - DETERMINISTIC):
+        print(
+            "WARNING: --llm was set but --tasks contains only deterministic "
+            f"tasks {sorted(DETERMINISTIC)}; no LLM call will be made. "
+            "Add LLM tasks, e.g. --tasks T2 T3 T8 T9 T11.",
+            file=sys.stderr,
+        )
+        return None
+    return _make_llm(args)
 
 
 def _gen_stream(records, tasks, *, llm, workers):
@@ -110,7 +134,7 @@ def _stream_write(path: Path, item_dicts, *, limit=None, progress=False) -> list
 
 def cmd_generate(args) -> None:
     records = _read_jsonl(Path(args.corpus))
-    llm = _make_llm(args) if args.llm else None
+    llm = _resolve_llm(args)
     stream = _gen_stream(records, args.tasks, llm=llm, workers=args.workers)
     written = _stream_write(Path(args.out), stream, progress=args.progress)
     print(f"generate: {len(written)} candidate items -> {args.out}")
@@ -140,7 +164,7 @@ def cmd_simple(args) -> None:
     random.Random(args.seed).shuffle(records)
     src = {r["passage_id"]: r["raw_text_trad"] for r in records}
 
-    llm = _make_llm(args) if args.llm else None
+    llm = _resolve_llm(args)
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     failed = 0
@@ -219,6 +243,10 @@ def _add_llm_args(c: argparse.ArgumentParser) -> None:
     c.add_argument(
         "--workers", type=int, default=8,
         help="concurrent LLM calls (used only with --llm; default 8)",
+    )
+    c.add_argument(
+        "--difficulty", default="Hard", choices=["Medium", "Hard", "Expert"],
+        help="LLM item difficulty (default Hard)",
     )
     c.add_argument(
         "--progress", action="store_true", help="show a tqdm progress bar",

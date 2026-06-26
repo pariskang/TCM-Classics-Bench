@@ -35,7 +35,22 @@
       "description": "external_required items MUST NOT enter the formal test set"
     },
     "difficulty": {"enum": ["Easy", "Medium", "Hard", "Expert"]},
-    "distractors": {"type": "array"},
+    "options": {
+      "type": "array",
+      "description": "MCQ options (T7-T9, T11, T12); empty for open-form tasks",
+      "items": {"type": "string"}
+    },
+    "distractors": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "option": {"type": "string"},
+          "exclusion_reason": {"type": "string"},
+          "requires_external": {"type": "boolean"}
+        }
+      }
+    },
     "safety_note": {"type": "string"},
     "quality_warning": {"type": "string"},
     "generator": {"type": "string", "description": "'deterministic' or a model id"},

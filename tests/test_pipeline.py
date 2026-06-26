@@ -194,6 +194,60 @@ def test_build_prompt_covers_all_tasks(book_dir: Path):
     assert prompts.build_prompt("NOT_A_TASK", rec) is None
 
 
+def test_difficulty_steers_prompt(book_dir: Path):
+    rec = next(r.to_dict() for r in ingest_book(book_dir, "2026-06-26"))
+    expert = prompts.build_prompt("T3", rec, "Expert")
+    medium = prompts.build_prompt("T3", rec, "Medium")
+    assert "Expert" in expert and "專家級" in expert
+    assert expert != medium
+
+
+def test_mcq_tasks_use_mcq_template(book_dir: Path):
+    rec = next(r.to_dict() for r in ingest_book(book_dir, "2026-06-26"))
+    for code in prompts.MCQ_TASKS:
+        p = prompts.build_prompt(code, rec, "Hard")
+        assert "單選題" in p and "options" in p and "exclusion_reason" in p
+
+
+def test_llm_mcq_item_parsed_and_validated(book_dir: Path):
+    recs = [r.to_dict() for r in ingest_book(book_dir, "2026-06-26")]
+    rec = next(r for r in recs if "太陽病" in r["raw_text_trad"])
+    payload = (
+        '{"task":"syndrome_formula_mapping","question":"下列何方主之？",'
+        '"options":["A. 栝蔞桂枝湯","B. 葛根湯","C. 麻黃湯","D. 白虎湯"],'
+        '"answer":"A","distractors":['
+        '{"option":"B","exclusion_reason":"葛根湯主無汗，與本條不符","requires_external":false},'
+        '{"option":"C","exclusion_reason":"麻黃湯為傷寒表實","requires_external":false},'
+        '{"option":"D","exclusion_reason":"白虎湯主陽明熱盛","requires_external":false}],'
+        '"context":"太陽病","evidence":["太陽病"],"inference_level":"implicit","difficulty":"Expert"}'
+    )
+    gen = LLMGenerator(_FakeClient(payload), difficulty="Expert")
+    item = gen.generate("T8", rec)
+    assert item is not None
+    d = item.to_dict()
+    assert d["difficulty"] == "Expert"
+    assert len(d["options"]) == 4
+    assert d["answer"] == "A"
+    res = validate_item(d, rec["raw_text_trad"])
+    assert res.ok, res.errors
+
+
+def test_validate_rejects_mcq_without_exclusion_reason(book_dir: Path):
+    recs = [r.to_dict() for r in ingest_book(book_dir, "2026-06-26")]
+    rec = next(r for r in recs if "太陽病" in r["raw_text_trad"])
+    item = {
+        "task": "formula_differentiation", "task_code": "T9",
+        "question": "?", "context": "太陽病", "answer": "A",
+        "options": ["A. 栝蔞桂枝湯", "B. 葛根湯", "C. 麻黃湯"],
+        "distractors": [{"option": "B"}, {"option": "C"}],
+        "evidence": {"book_title_trad": "x", "source_id": "jicheng_tcm", "spans": ["太陽病"]},
+        "inference_level": "implicit",
+    }
+    res = validate_item(item, rec["raw_text_trad"])
+    assert not res.ok
+    assert any("exclusion_reason" in e for e in res.errors)
+
+
 def test_make_client_unknown_provider():
     import pytest as _pytest
 

@@ -143,6 +143,22 @@ resumed/inspected mid-flight. The Colab notebook adds **Google-Drive streaming**
 — each question is flushed to your Drive as it is generated, so a dropped
 session loses nothing.
 
+### Harder LLM-generated items
+
+LLM tasks are steered toward **reasoning-heavy** questions, not surface
+lookups. `--difficulty {Medium,Hard,Expert}` (default **Hard**) injects a
+directive that demands multi-step inference, and the reasoning tasks
+**T7–T9, T11, T12** are emitted as **4-option single-choice** items with
+hard, source-grounded distractors — each distractor must carry an
+`exclusion_reason`, and one that needs outside knowledge downgrades the item.
+Everything still has to pass source-grounded validation (evidence spans,
+formula/herb/dose in source, no `external_required` in the test set).
+
+> **Note (important):** `--llm` only does anything if `--tasks` contains an
+> LLM task. `T1` and `T6` are *deterministic* — `--tasks T1 T6 --llm` makes no
+> API call (the CLI now warns). For real LLM generation use, e.g.,
+> `--tasks T2 T3 T8 T9 T11`.
+
 ### LLM providers
 
 LLM-backed tasks (T2–T12) work through a provider-agnostic client
@@ -158,7 +174,8 @@ LLM-backed tasks (T2–T12) work through a provider-agnostic client
 ```bash
 export AZURE_OPENAI_API_KEY=... AZURE_OPENAI_ENDPOINT=https://<res>.openai.azure.com
 python -m tcm_bench generate --corpus data/pilot/pilot2_zhongjing.jsonl \
-       --out items.jsonl --tasks T2 T6 --llm --provider azure --model my-gpt4o-deploy
+       --out items.jsonl --tasks T2 T3 T8 T9 --llm --difficulty Expert \
+       --provider azure --model my-gpt4o-deploy --workers 8 --progress
 ```
 
 ## Example item (T6 方劑結構解析, deterministic, 傷寒論宋本)

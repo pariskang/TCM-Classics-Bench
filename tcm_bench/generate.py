@@ -135,14 +135,22 @@ class LLMGenerator:
     :mod:`tcm_bench.llm` — anything exposing ``complete(system, prompt)``.
     """
 
-    def __init__(self, client, *, max_tokens: int = 2048, temperature: float = 0.0):
+    def __init__(
+        self,
+        client,
+        *,
+        difficulty: str = "Hard",
+        max_tokens: int = 2048,
+        temperature: float = 0.0,
+    ):
         self.client = client
         self.model = getattr(client, "model", "llm")
+        self.difficulty = difficulty
         self.max_tokens = max_tokens
         self.temperature = temperature
 
     def generate(self, task_code: str, rec: dict) -> BenchItem | None:
-        prompt = prompts.build_prompt(task_code, rec)
+        prompt = prompts.build_prompt(task_code, rec, self.difficulty)
         if prompt is None:
             return None
         raw = self.client.complete(
@@ -151,7 +159,7 @@ class LLMGenerator:
         data = _extract_json(raw)
         if data is None:
             return None
-        return _bench_item_from_llm(task_code, rec, data, self.model)
+        return _bench_item_from_llm(task_code, rec, data, self.model, self.difficulty)
 
 
 def AnthropicGenerator(model: str = "claude-opus-4-8", api_key: str | None = None) -> LLMGenerator:
@@ -171,6 +179,17 @@ def _extract_json(text: str) -> dict | None:
         return None
 
 
+def _answer_text(answer) -> str:
+    """Flatten an answer (str | dict | list) to a string for keyword scans."""
+    if isinstance(answer, str):
+        return answer
+    if isinstance(answer, dict):
+        return " ".join(_answer_text(v) for v in answer.values())
+    if isinstance(answer, list):
+        return " ".join(_answer_text(v) for v in answer)
+    return str(answer)
+
+
 def _default_task_name(task_code: str) -> str:
     from .taxonomy import TASKS
 
@@ -178,9 +197,17 @@ def _default_task_name(task_code: str) -> str:
     return task.name_en if task else task_code
 
 
-def _bench_item_from_llm(task_code: str, rec: dict, data: dict, model: str) -> BenchItem:
+def _bench_item_from_llm(
+    task_code: str, rec: dict, data: dict, model: str, difficulty: str = "Hard"
+) -> BenchItem:
     answer = data.get("answer", data)
     spans = data.get("evidence") or data.get("evidence_spans") or []
+    options = data.get("options") or []
+    safety = data.get("safety_note", "")
+    # Auto-fill the safety note if a restricted herb slipped through unflagged.
+    blob = f"{data.get('context','')}{_answer_text(answer)}{' '.join(map(str, options))}"
+    if not safety and any(h in blob for h in SAFETY_HERBS):
+        safety = SAFETY_NOTE
     return BenchItem(
         item_id=_item_id(rec["book_id"], task_code, rec["passage_id"], salt=model),
         task=data.get("task") or _default_task_name(task_code),
@@ -192,8 +219,10 @@ def _bench_item_from_llm(task_code: str, rec: dict, data: dict, model: str) -> B
         book_id=rec["book_id"],
         passage_id=rec["passage_id"],
         inference_level=data.get("inference_level", "direct"),
-        difficulty=data.get("difficulty") or "Medium",
-        safety_note=data.get("safety_note", ""),
+        difficulty=data.get("difficulty") or difficulty,
+        options=options if isinstance(options, list) else [],
+        distractors=data.get("distractors") or [],
+        safety_note=safety,
         quality_warning=data.get("quality_warning", ""),
         generator=model,
     )

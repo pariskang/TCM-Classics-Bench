@@ -129,13 +129,33 @@ TRANSLATION_TEMPLATE = """請基於以下中醫笈成古籍片段，生成「文
 
 
 # --------------------------------------------------------------------------
-# Generic template — used for any task without a bespoke template, so all of
-# T1–T12 are reachable through the LLM path.  The task is described from the
-# taxonomy so the model knows what to produce.
+# Difficulty — every LLM prompt is steered toward harder, reasoning-heavy
+# items.  Surface "copy a span" questions are explicitly discouraged.
 # --------------------------------------------------------------------------
-GENERIC_TEMPLATE = """請基於以下中醫笈成古籍片段，生成一道「{task_zh}」（{task_en}）測評題。
+DIFFICULTY_DIRECTIVE = {
+    "Medium": "難度中等：可涉及單步推理，避免純粹字面複述。",
+    "Hard": (
+        "難度高（Hard）：必須考查跨句/跨段的多步推理、相近概念辨析，或病機—治法—"
+        "方藥的綜合判斷；不得出可直接複製原文作答的表層題；題幹避免直接點出答案線索。"
+    ),
+    "Expert": (
+        "難度專家級（Expert）：要求鑑別診斷、類方辨析、病機溯因等深度推理，推理鏈至少"
+        "兩步；考點需區分高手與初學者；若為選擇題，干擾項須高度迷惑（相近方證、相似"
+        "藥性、鄰近條文），且每個干擾項附基於原文的排除理由。"
+    ),
+}
+
+# Tasks best expressed as 4-option single-choice questions with hard distractors.
+MCQ_TASKS = {"T7", "T8", "T9", "T11", "T12"}
+
+# --------------------------------------------------------------------------
+# Generic open-form template — for non-MCQ tasks without a bespoke template,
+# so all of T1–T12 are reachable through the LLM path.
+# --------------------------------------------------------------------------
+GENERIC_TEMPLATE = """請基於以下中醫笈成古籍片段，生成一道**高難度**「{task_zh}」（{task_en}）測評題。
 
 任務說明：{task_desc}
+難度要求：{difficulty_directive}
 
 輸入：
 {meta}
@@ -148,9 +168,42 @@ GENERIC_TEMPLATE = """請基於以下中醫笈成古籍片段，生成一道「{
   "answer": null,
   "evidence": ["<原文 span，必須逐字出現於原文>"],
   "inference_level": "direct/implicit/external_required",
-  "difficulty": "Easy/Medium/Hard/Expert",
+  "difficulty": "{difficulty}",
   "safety_note": "",
   "quality_warning": ""
+}}"""
+
+# --------------------------------------------------------------------------
+# MCQ template — hard single-choice with source-grounded distractors.
+# --------------------------------------------------------------------------
+MCQ_TEMPLATE = """請基於以下中醫笈成古籍片段，生成一道**高難度單選題**，考查「{task_zh}」（{task_en}）。
+
+任務說明：{task_desc}
+難度要求：{difficulty_directive}
+
+硬性要求：
+1. 4 個選項，僅 1 個正確。正確答案必須由原文直接或可推理支持，evidence span 逐字出現於原文。
+2. 3 個干擾項要高度迷惑（相近方證/相似藥性/鄰近條文），每個干擾項附**基於原文**的排除理由。
+3. 若任一排除理由需要現代教材知識，將 inference_level 標為 external_required（該題會被剔除）。
+4. 不得引入原文未出現的方劑、藥物、劑量、病名。涉及毒性/禁限藥材時填寫 safety_note。
+
+輸入：
+{meta}
+
+輸出 JSON：
+{{
+  "task": "{task_en}",
+  "question": "",
+  "options": ["A. ...", "B. ...", "C. ...", "D. ..."],
+  "answer": "<正確選項字母，如 B>",
+  "distractors": [
+    {{"option": "A", "exclusion_reason": "", "requires_external": false}}
+  ],
+  "context": "<相關原文 span>",
+  "evidence": ["<原文 span，必須逐字出現於原文>"],
+  "inference_level": "direct/implicit",
+  "difficulty": "{difficulty}",
+  "safety_note": ""
 }}"""
 
 
@@ -170,19 +223,23 @@ def translation_prompt(rec: dict) -> str:
     return TRANSLATION_TEMPLATE.format(meta=_meta_block(rec))
 
 
-def generic_prompt(task_code: str, rec: dict) -> str:
+def generic_prompt(task_code: str, rec: dict, difficulty: str = "Hard") -> str:
     from .taxonomy import TASKS
 
     task = TASKS[task_code]
-    return GENERIC_TEMPLATE.format(
+    template = MCQ_TEMPLATE if task_code in MCQ_TASKS else GENERIC_TEMPLATE
+    return template.format(
         task_zh=task.name_zh,
         task_en=task.name_en,
         task_desc=task.description,
+        difficulty=difficulty,
+        difficulty_directive=DIFFICULTY_DIRECTIVE.get(difficulty, DIFFICULTY_DIRECTIVE["Hard"]),
         meta=_meta_block(rec),
     )
 
 
 # Bespoke per-task builders; tasks not listed fall back to ``generic_prompt``.
+# Bespoke builders ignore difficulty (their constraints already fix the form).
 PROMPT_BUILDERS = {
     "router": task_router_prompt,
     "T6": formula_parse_prompt,
@@ -190,13 +247,17 @@ PROMPT_BUILDERS = {
 }
 
 
-def build_prompt(task_code: str, rec: dict) -> str | None:
-    """Return the prompt for *task_code*, or ``None`` if it is not a T1–T12 task."""
+def build_prompt(task_code: str, rec: dict, difficulty: str = "Hard") -> str | None:
+    """Return the prompt for *task_code*, or ``None`` if it is not a T1–T12 task.
+
+    *difficulty* (Medium | Hard | Expert) steers the generic / MCQ templates
+    toward reasoning-heavy items.
+    """
     from .taxonomy import TASKS
 
     builder = PROMPT_BUILDERS.get(task_code)
     if builder is not None:
         return builder(rec)
     if task_code in TASKS:
-        return generic_prompt(task_code, rec)
+        return generic_prompt(task_code, rec, difficulty)
     return None

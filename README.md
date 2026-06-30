@@ -4,8 +4,9 @@
 *A Source-Grounded Benchmark for Large Language Models on Classical Chinese
 Medicine Texts*
 
-[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/pariskang/TCM-Classics-Bench/blob/claude/tcm-classics-bench-dataset-tu71dt/notebooks/TCM_Classics_Bench.ipynb)
-&nbsp; ![tests](https://img.shields.io/badge/tests-16%20passing-brightgreen)
+[![Build benchmark in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/pariskang/TCM-Classics-Bench/blob/claude/tcm-classics-bench-dataset-tu71dt/notebooks/TCM_Classics_Bench.ipynb) **build**
+&nbsp; [![Evaluate in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/pariskang/TCM-Classics-Bench/blob/claude/tcm-classics-bench-dataset-tu71dt/notebooks/TCM_Classics_Bench_Eval.ipynb) **evaluate**
+&nbsp; ![tests](https://img.shields.io/badge/tests-33%20passing-brightgreen)
 &nbsp; ![license](https://img.shields.io/badge/code-MIT-blue)
 &nbsp; ![data](https://img.shields.io/badge/data-CC0%2FCC--BY--4.0-lightgrey)
 
@@ -61,8 +62,11 @@ textbook knowledge instead of the cited text, or the citation is real but the
 
 | Path | Contents |
 | --- | --- |
-| `notebooks/TCM_Classics_Bench.ipynb` | one-click Colab: all features end-to-end |
-| `tcm_bench/` | the pipeline (markup → parse → ingest → taxonomy → generate → validate) |
+| `notebooks/TCM_Classics_Bench.ipynb` | one-click Colab: build the benchmark |
+| `notebooks/TCM_Classics_Bench_Eval.ipynb` | one-click Colab: **evaluate a model** |
+| `tcm_bench/` | the pipeline (markup → parse → ingest → taxonomy → generate → validate → evaluate) |
+| `tcm_bench/evaluate.py` | model evaluation: prompts (0-shot/few-shot/CoT) + scorers |
+| `data/bench_ner/*.jsonl` | **NER (T4) test subset** — entities verbatim in source |
 | `schemas/` | JSON-Schema for corpus records and bench items |
 | `scripts/download_corpus.sh` | fetch + extract the Jicheng snapshot |
 | `scripts/build_release.py` | regenerate all `data/` artifacts from the corpus |
@@ -223,10 +227,48 @@ python -m tcm_bench generate --corpus data/pilot/pilot2_zhongjing.jsonl \
 }
 ```
 
+## Evaluating a model
+
+`tcm_bench evaluate` scores any model on the benchmark. The model under test is
+any provider from the table above (`--provider litellm|poe|azure|anthropic`),
+and three prompting modes are supported: **`zero_shot`**, **`few_shot`**
+(prepends solved examples of the same task), **`cot`** (reason step-by-step,
+then a final answer). Auto-scored families:
+
+| Family | Tasks | Metric |
+| --- | --- | --- |
+| MCQ | T7–T9, T11, T12 | accuracy (predicted option == gold) |
+| NER | T4 | F1 over `(text, type)` entity spans |
+| formula | T6 | F1 over the herb set |
+| punctuation | T1 | F1 over 句讀 boundary positions |
+
+Open-ended tasks (T2/T3/T5/T10) are marked unscored and excluded from the
+headline numbers. Runs are concurrent (`--workers`), **resumable** (`--resume`),
+and stream per-item records as they complete; `--progress` shows a bar with ETA.
+
+```bash
+# Score a Poe model on the NER subset with chain-of-thought prompting
+export POE_API_KEY=...
+python -m tcm_bench evaluate --items data/bench_ner/pilot2_zhongjing.jsonl \
+       --out eval.jsonl --scores-out scores.json \
+       --provider poe --model Claude-Sonnet-4 --mode cot --workers 16 --progress
+
+# Few-shot over T1+T4+T6 via LiteLLM (any routed model)
+python -m tcm_bench evaluate --items data/bench/pilot2_zhongjing.jsonl \
+       --out eval.jsonl --mode few_shot --shots 3 \
+       --provider litellm --model gemini/gemini-1.5-pro
+```
+
+`scores.json` holds per-task scores plus an overall macro average. The
+**[evaluation Colab](https://colab.research.google.com/github/pariskang/TCM-Classics-Bench/blob/claude/tcm-classics-bench-dataset-tu71dt/notebooks/TCM_Classics_Bench_Eval.ipynb)**
+does the same with a live progress bar + ETA, streams results to Google Drive,
+resumes, and prints a per-task score table (plus an optional zero-shot vs
+few-shot vs CoT comparison).
+
 ## Tests
 
 ```bash
-PYTHONPATH=. python -m pytest tests/ -q
+PYTHONPATH=. python -m pytest tests/ -q   # 33 passing
 ```
 
 ## Licensing

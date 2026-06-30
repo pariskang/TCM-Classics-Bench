@@ -259,7 +259,22 @@ def validate_item(item, source_text):
 
 ---
 
-## 十、命名
+## 十、NER 測試子集（T4，確定性）
+
+利用 `<F>` 方劑塊已抽出的 方名/中藥/劑量/炮製 span，為每個方劑段落生成一道 NER
+題（`generate_ner`）：實體即原文逐字片段，gold 標註天然源約束，無需 LLM。輸出於
+`data/bench_ner/`，每題經 `validate.py` 校驗每個實體出現於原文。
+
+## 十一、模型評測（`tcm_bench evaluate`）
+
+`tcm_bench/evaluate.py` 在基準上評測任意模型（provider：anthropic/azure/poe/litellm）。
+
+- **Prompt 模式**：`zero_shot` / `few_shot`（同類示例前置）/ `cot`（思維鏈）。
+- **自動評分**：單選題（T7–T9/T11/T12）→ accuracy；NER（T4）→ F1；方劑（T6）→ 藥味 F1；
+  句讀（T1）→ 句讀邊界 F1。開放題（T2/T3/T5/T10）標為不可自動評分，排除於總分。
+- **並發 / 斷點續跑 / 實時寫入 / 進度+ETA**；輸出每任務分數與總分（macro）。
+
+## 十二、命名
 
 - 英文：**TCM-Classics-Bench: A Source-Grounded Benchmark for Large Language
   Models on Classical Chinese Medicine Texts**

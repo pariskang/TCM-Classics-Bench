@@ -109,6 +109,7 @@ def build(root: Path, per_book: int, bench_cap: int) -> None:
             "items_valid": len(valid),
             "items_failed_validation": failed,
             "items_committed": len(capped),
+            "ner_committed": len(ner_items),
             "by_task": dict(task_counts),
         }
         print(

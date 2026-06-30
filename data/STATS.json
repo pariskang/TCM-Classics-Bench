@@ -15,6 +15,7 @@
       "items_valid": 859,
       "items_failed_validation": 0,
       "items_committed": 75,
+      "ner_committed": 0,
       "by_task": {
         "T1": 859
       }
@@ -35,6 +36,7 @@
       "items_valid": 4704,
       "items_failed_validation": 0,
       "items_committed": 300,
+      "ner_committed": 75,
       "by_task": {
         "T1": 3688,
         "T4": 509,
@@ -58,6 +60,7 @@
       "items_valid": 28679,
       "items_failed_validation": 0,
       "items_committed": 175,
+      "ner_committed": 0,
       "by_task": {
         "T1": 28679
       }

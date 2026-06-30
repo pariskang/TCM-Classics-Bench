@@ -60,6 +60,11 @@ def validate_item(item: dict, source_text: str) -> ValidationResult:
         errors += _validate_formula(answer, source_text)
     if task == "punctuation_restoration":
         errors += _validate_punctuation(item, source_text)
+    if task == "entity_recognition" and isinstance(answer, dict):
+        for ent in answer.get("entities", []):
+            span = ent.get("text")
+            if span and not _contains(source_text, span):
+                errors.append(f"entity not in source: {span!r}")
 
     # 4b. MCQ items: each distractor needs a source-based exclusion reason;
     # an exclusion that needs outside knowledge downgrades the item.

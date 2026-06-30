@@ -19,6 +19,7 @@ from collections import Counter
 from pathlib import Path
 
 from . import ingest, taxonomy
+from .evaluate import PROMPT_MODES
 from .generate import (
     DETERMINISTIC,
     LLMGenerator,
@@ -228,6 +229,71 @@ def cmd_simple(args) -> None:
     )
 
 
+def cmd_evaluate(args) -> None:
+    """Score a model on a benchmark JSONL, with resume + real-time writes."""
+    import time
+
+    from . import evaluate as ev
+
+    items = _read_jsonl(Path(args.items))
+    if args.tasks:
+        items = [it for it in items if it["task_code"] in set(args.tasks)]
+    if args.limit:
+        items = items[: args.limit]
+
+    out = Path(args.out)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    done = set()
+    if args.resume and out.exists():
+        for r in _read_jsonl(out):
+            done.add((r["item_id"], r["prompt_mode"]))
+    todo = [it for it in items if (it["item_id"], args.mode) not in done]
+    print(f"evaluate: {len(items)} items, {len(todo)} to do "
+          f"(resumed {len(done)}), mode={args.mode}, model={args.model or args.provider}")
+
+    client = make_client(args.provider, args.model)
+    stats: dict = {}
+    bar = None
+    if args.progress:
+        try:
+            from tqdm.auto import tqdm
+
+            bar = tqdm(total=len(todo), unit="item", desc=f"eval/{args.mode}")
+        except ImportError:
+            bar = None
+
+    records = list(_read_jsonl(out)) if (args.resume and out.exists()) else []
+    start = time.time()
+    n = 0
+    with out.open("a" if args.resume else "w", encoding="utf-8") as fh:
+        for rec in ev.evaluate_dataset(
+            todo, client, mode=args.mode, shots_pool=items, n_shots=args.shots,
+            max_workers=args.workers, stats=stats,
+            model_label=args.model or args.provider,
+        ):
+            fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
+            fh.flush()
+            records.append(rec)
+            n += 1
+            if bar is not None:
+                bar.update(1)
+            elif args.progress and n % 20 == 0:
+                rate = n / max(time.time() - start, 1e-6)
+                eta = (len(todo) - n) / rate if rate else 0
+                print(f"  {n}/{len(todo)}  {rate:.1f}/s  ETA {eta/60:.1f}min", flush=True)
+    if bar is not None:
+        bar.close()
+
+    summary = ev.aggregate(records)
+    print("\n=== scores ===")
+    print(json.dumps(summary, ensure_ascii=False, indent=2))
+    if args.scores_out:
+        Path(args.scores_out).write_text(
+            json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        print(f"scores -> {args.scores_out}")
+
+
 def cmd_validate(args) -> None:
     items = _read_jsonl(Path(args.items))
     corpus = {r["passage_id"]: r for r in _read_jsonl(Path(args.corpus))}
@@ -306,6 +372,21 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--items", required=True)
     c.add_argument("--corpus", required=True)
     c.set_defaults(func=cmd_validate)
+
+    c = sub.add_parser("evaluate", help="score a model on a benchmark JSONL")
+    c.add_argument("--items", required=True, help="benchmark items JSONL")
+    c.add_argument("--out", required=True, help="per-item eval records JSONL")
+    c.add_argument("--scores-out", default=None, help="write aggregate scores JSON here")
+    c.add_argument("--mode", default="zero_shot", choices=list(PROMPT_MODES))
+    c.add_argument("--shots", type=int, default=3, help="few-shot examples (mode=few_shot)")
+    c.add_argument("--tasks", nargs="*", help="restrict to these task codes")
+    c.add_argument("--limit", type=int, default=None)
+    c.add_argument("--provider", default="anthropic", choices=sorted(PROVIDERS))
+    c.add_argument("--model", default=None)
+    c.add_argument("--workers", type=int, default=8)
+    c.add_argument("--resume", action="store_true", help="continue a prior run")
+    c.add_argument("--progress", action="store_true", help="progress bar + ETA")
+    c.set_defaults(func=cmd_evaluate)
     return p
 
 

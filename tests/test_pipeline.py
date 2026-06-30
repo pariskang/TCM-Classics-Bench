@@ -10,12 +10,15 @@ from pathlib import Path
 
 import pytest
 
+from tcm_bench import evaluate as ev
 from tcm_bench import llm, markup, prompts, taxonomy
+from tcm_bench.concurrency import bounded_imap
 from tcm_bench.generate import (
     LLMGenerator,
     balanced_take,
     generate_items,
     generate_items_concurrent,
+    generate_ner,
     generate_t1,
     generate_t6_from_formulas,
 )
@@ -124,6 +127,91 @@ def test_t1_roundtrip_validates(book_dir: Path):
     d = item.to_dict()
     res = validate_item(d, cond["raw_text_trad"])
     assert res.ok, res.errors
+
+
+def test_ner_generator_is_source_grounded(book_dir: Path):
+    recs = [r.to_dict() for r in ingest_book(book_dir, "2026-06-26")]
+    formula_rec = next(r for r in recs if r["formulas"])
+    items = list(generate_ner(formula_rec))
+    assert items, "formula passage should yield a NER item"
+    d = items[0].to_dict()
+    assert d["task_code"] == "T4"
+    types = {e["type"] for e in d["answer"]["entities"]}
+    assert {"formula", "herb"} <= types
+    assert validate_item(d, formula_rec["raw_text_trad"]).ok
+    d["answer"]["entities"].append({"text": "人參", "type": "herb"})
+    assert not validate_item(d, formula_rec["raw_text_trad"]).ok
+
+
+# --- evaluation ---------------------------------------------------------
+def _ner_item(book_dir: Path) -> dict:
+    recs = [r.to_dict() for r in ingest_book(book_dir, "2026-06-26")]
+    formula_rec = next(r for r in recs if r["formulas"])
+    return next(generate_ner(formula_rec)).to_dict()
+
+
+def test_eval_scorers_perfect_and_wrong(book_dir: Path):
+    ner = _ner_item(book_dir)
+    assert ev.score_prediction(ner, ev.gold_render(ner))["score"] == 1.0
+    assert ev.score_prediction(ner, '{"entities":[{"text":"人參","type":"herb"}]}')["score"] == 0.0
+
+    mcq = {"task_code": "T8", "options": ["A. 甲", "B. 乙"], "answer": "B",
+           "question": "q", "context": "c"}
+    assert ev.score_prediction(mcq, "推理…答案：B")["correct"] is True
+    assert ev.score_prediction(mcq, "答案：A")["correct"] is False
+
+    t1 = {"task_code": "T1", "question": "q", "context": "上工治未病",
+          "answer": "上工，治未病。"}
+    assert ev.score_prediction(t1, "標點：上工，治未病。")["score"] == 1.0
+
+
+def test_eval_open_task_not_scored():
+    assert ev.scorable({"task_code": "T2", "question": "q"}) is False
+    sc = ev.score_prediction({"task_code": "T2", "question": "q", "answer": "x"}, "whatever")
+    assert sc["scorable"] is False and sc["score"] is None
+
+
+def test_eval_prompt_modes(book_dir: Path):
+    ner = _ner_item(book_dir)
+    _, zero = ev.build_eval_prompt(ner, "zero_shot")
+    _, few = ev.build_eval_prompt(ner, "few_shot", shots=[ner])
+    _, cot = ev.build_eval_prompt(ner, "cot")
+    assert "示例" in few and "示例" not in zero
+    assert "推理" in cot
+
+
+def test_eval_aggregate():
+    recs = [
+        {"task_code": "T4", "scorable": True, "metric": "f1", "score": 0.8},
+        {"task_code": "T8", "scorable": True, "metric": "accuracy", "score": 1.0},
+        {"task_code": "T8", "scorable": True, "metric": "accuracy", "score": 0.0},
+        {"task_code": "T2", "scorable": False, "metric": "none", "score": None},
+    ]
+    agg = ev.aggregate(recs)
+    assert agg["per_task"]["T8"]["score"] == 0.5
+    assert agg["n_unscored"] == 1
+    assert agg["overall_macro"] == round((0.8 + 0.5) / 2, 4)
+
+
+def test_eval_dataset_runs_concurrently(book_dir: Path):
+    items = [_ner_item(book_dir)] * 6
+
+    class _Echo:
+        model = "echo"
+
+        def complete(self, system, user, *, max_tokens=1500, temperature=0.0):
+            return '{"entities":[]}'
+
+    stats = {}
+    recs = list(ev.evaluate_dataset(items, _Echo(), max_workers=3, stats=stats))
+    assert len(recs) == len(items)
+    assert stats["done"] == len(items)
+    assert ev.aggregate(recs)["per_task"]["T4"]["metric"] == "f1"
+
+
+def test_bounded_imap_runs_all():
+    out = list(bounded_imap(lambda x: x * 2, range(10), max_workers=3))
+    assert sorted(out) == [i * 2 for i in range(10)]
 
 
 def test_validation_rejects_invented_herb(book_dir: Path):

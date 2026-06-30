@@ -70,7 +70,7 @@ def build(root: Path, per_book: int, bench_cap: int) -> None:
 
         # 3. Deterministic generation over the FULL corpus, validate, cap.
         src_by_id = {r["passage_id"]: r["raw_text_trad"] for r in full}
-        items = [it.to_dict() for it in generate_items(full, ["T1", "T6"])]
+        items = [it.to_dict() for it in generate_items(full, ["T1", "T4", "T6"])]
         valid, failed = [], 0
         for it in items:
             res = validate_item(it, src_by_id.get(it["passage_id"], ""))
@@ -81,6 +81,11 @@ def build(root: Path, per_book: int, bench_cap: int) -> None:
 
         capped = _cap_items(valid, bench_cap)
         _write_jsonl(ROOT_OUT / "bench" / f"{pilot}.jsonl", capped)
+
+        # Dedicated NER (T4) test subset, capped per book.
+        ner_items = _cap_items([it for it in valid if it["task_code"] == "T4"], bench_cap)
+        if ner_items:
+            _write_jsonl(ROOT_OUT / "bench_ner" / f"{pilot}.jsonl", ner_items)
 
         # Make the committed corpus a superset of every passage the committed
         # items cite, so the dataset can be re-validated from committed files

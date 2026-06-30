@@ -31,12 +31,13 @@
       "passages_full": 4305,
       "passages_sampled": 255,
       "formula_passages": 596,
-      "items_generated": 4195,
-      "items_valid": 4195,
+      "items_generated": 4704,
+      "items_valid": 4704,
       "items_failed_validation": 0,
-      "items_committed": 225,
+      "items_committed": 300,
       "by_task": {
         "T1": 3688,
+        "T4": 509,
         "T6": 507
       }
     },

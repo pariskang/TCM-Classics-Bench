@@ -126,6 +126,58 @@ def generate_t6_from_formulas(rec: dict) -> Iterator[BenchItem]:
 
 
 # --------------------------------------------------------------------------
+# T4 — named-entity recognition (deterministic subset, from <F> blocks).
+# --------------------------------------------------------------------------
+NER_QUESTION = (
+    "請從下列古籍方劑條文中識別所有實體，並標註類型"
+    "（formula=方名, herb=中藥, dose=劑量, preparation=炮製）。"
+)
+
+
+def generate_ner(rec: dict, *, min_entities: int = 3) -> Iterator[BenchItem]:
+    """A source-grounded NER item per formula-bearing passage.
+
+    Entities (方名/中藥/劑量/炮製) are exactly the spans extracted from the
+    ``<F>`` blocks during ingestion, so the gold labels are verbatim in the
+    source — a clean test subset with no LLM in the loop.
+    """
+    text = rec["raw_text_trad"]
+    entities: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+
+    def add(span, etype: str) -> None:
+        span = (span or "").strip()
+        if span and (span, etype) not in seen and span in text:
+            seen.add((span, etype))
+            entities.append({"text": span, "type": etype})
+
+    for fb in rec.get("formulas", []):
+        add(fb.get("formula_name"), "formula")
+        for ing in fb.get("ingredients", []):
+            add(ing.get("herb"), "herb")
+            add(ing.get("dose"), "dose")
+            add(ing.get("preparation"), "preparation")
+
+    if len(entities) < min_entities:
+        return
+    yield BenchItem(
+        item_id=_item_id(rec["book_id"], "T4", rec["passage_id"]),
+        task="entity_recognition",
+        task_code="T4",
+        question=NER_QUESTION,
+        context=text,
+        answer={"entities": entities},
+        evidence=_evidence(rec, [e["text"] for e in entities]),
+        book_id=rec["book_id"],
+        passage_id=rec["passage_id"],
+        inference_level="direct",
+        difficulty="Medium",
+        safety_note=_safety_note_for(text),
+        generator="deterministic",
+    )
+
+
+# --------------------------------------------------------------------------
 # LLM-backed generation.
 # --------------------------------------------------------------------------
 class LLMGenerator:
@@ -150,37 +202,18 @@ class LLMGenerator:
         self.max_tokens = max_tokens
         self.temperature = temperature
         self.max_retries = max_retries
-        # Populated when generation runs; lets callers see why items were lost.
-        self.last_error: str | None = None
-
-    def _complete_with_retry(self, prompt: str) -> str:
-        """Call the client, retrying transient errors (rate limits, timeouts).
-
-        Re-raises the final exception so the orchestrator can count it as an
-        errored job rather than silently confusing it with a validation drop.
-        """
-        import time
-
-        delay = 1.0
-        for attempt in range(self.max_retries + 1):
-            try:
-                return self.client.complete(
-                    prompts.SYSTEM, prompt,
-                    max_tokens=self.max_tokens, temperature=self.temperature,
-                )
-            except Exception as e:  # noqa: BLE001 - provider-agnostic
-                self.last_error = f"{type(e).__name__}: {e}"
-                if attempt >= self.max_retries:
-                    raise
-                time.sleep(min(delay, 16.0))
-                delay *= 2
-        raise RuntimeError("unreachable")
 
     def generate(self, task_code: str, rec: dict) -> BenchItem | None:
+        from .llm import complete_with_retry
+
         prompt = prompts.build_prompt(task_code, rec, self.difficulty)
         if prompt is None:
             return None
-        raw = self._complete_with_retry(prompt)
+        raw = complete_with_retry(
+            self.client, prompts.SYSTEM, prompt,
+            max_tokens=self.max_tokens, temperature=self.temperature,
+            max_retries=self.max_retries,
+        )
         data = _extract_json(raw)
         if data is None:
             return None
@@ -256,7 +289,19 @@ def _bench_item_from_llm(
 # --------------------------------------------------------------------------
 # Orchestration.
 # --------------------------------------------------------------------------
-DETERMINISTIC = {"T1", "T6"}
+# Tasks produced deterministically (no LLM, source-grounded by construction).
+DETERMINISTIC = {"T1", "T4", "T6"}
+
+
+def _deterministic_items(rec: dict, candidate: set) -> Iterator[BenchItem]:
+    if "T1" in candidate:
+        item = generate_t1(rec)
+        if item:
+            yield item
+    if "T4" in candidate:
+        yield from generate_ner(rec)
+    if "T6" in candidate:
+        yield from generate_t6_from_formulas(rec)
 
 
 def generate_items(
@@ -267,7 +312,7 @@ def generate_items(
 ) -> Iterator[BenchItem]:
     """Yield candidate items for *tasks* over *records*.
 
-    Deterministic tasks (T1, T6) always run.  Other tasks run only when an
+    Deterministic tasks (T1, T4, T6) always run.  Other tasks run only when an
     *llm* generator is supplied; otherwise they are skipped (no fabrication).
     Consumers may ``break`` early — this is a generator, so generation (and
     any API calls) stops as soon as you stop pulling from it.
@@ -275,12 +320,7 @@ def generate_items(
     task_set = set(tasks)
     for rec in records:
         candidate = set(rec.get("candidate_tasks", [])) & task_set
-        if "T1" in candidate:
-            item = generate_t1(rec)
-            if item:
-                yield item
-        if "T6" in candidate:
-            yield from generate_t6_from_formulas(rec)
+        yield from _deterministic_items(rec, candidate)
         if llm is not None:
             for tc in sorted(candidate - DETERMINISTIC):
                 item = llm.generate(tc, rec)
@@ -338,12 +378,8 @@ def generate_items_concurrent(
     for rec in records:
         candidate = set(rec.get("candidate_tasks", [])) & task_set
         pid = rec["passage_id"]
-        if "T1" in candidate and (pid, "T1") not in skip:
-            item = generate_t1(rec)
-            if item:
-                det_items.append(item)
-        if "T6" in candidate and (pid, "T6") not in skip:
-            det_items.extend(generate_t6_from_formulas(rec))
+        det_candidate = {t for t in candidate & DETERMINISTIC if (pid, t) not in skip}
+        det_items.extend(_deterministic_items(rec, det_candidate))
         if llm is not None:
             for tc in sorted(candidate - DETERMINISTIC):
                 if (pid, tc) not in skip:

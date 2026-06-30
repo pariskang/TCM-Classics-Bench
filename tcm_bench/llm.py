@@ -37,6 +37,36 @@ def _require(env: str) -> str:
     return val
 
 
+def complete_with_retry(
+    client: "LLMClient",
+    system: str,
+    prompt: str,
+    *,
+    max_tokens: int = 2048,
+    temperature: float = 0.0,
+    max_retries: int = 4,
+) -> str:
+    """Call ``client.complete`` retrying transient errors with exponential
+    backoff.  Re-raises the final exception so callers can count it rather than
+    silently confuse a rate-limit drop with an empty answer.  Shared by the
+    generation and evaluation paths.
+    """
+    import time
+
+    delay = 1.0
+    for attempt in range(max_retries + 1):
+        try:
+            return client.complete(
+                system, prompt, max_tokens=max_tokens, temperature=temperature
+            )
+        except Exception:  # noqa: BLE001 - provider-agnostic
+            if attempt >= max_retries:
+                raise
+            time.sleep(min(delay, 16.0))
+            delay *= 2
+    raise RuntimeError("unreachable")
+
+
 # --------------------------------------------------------------------------
 # Anthropic
 # --------------------------------------------------------------------------
